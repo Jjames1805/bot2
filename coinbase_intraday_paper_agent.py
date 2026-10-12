@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Full Continuous Market Coverage)
---------------------------------------------------------------
-Paper trading only. Monitors all Coinbase USD spot pairs by batching 
-candles sequentially while pulling live prices across all pairs globally.
+Coinbase Paper Trading Agent (Full Continuous Market Coverage with Auto-Refresh)
+------------------------------------------------------------------------------
+Monitors all Coinbase USD spot pairs, executing automatic updates every 30 seconds,
+anti-churn fee protection, ATR trailing stops, and genetic strategy evolution.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ FEE_RATE = 0.001
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 14400
 REQUEST_TIMEOUT = 3
-CANDLE_BATCH_SIZE = 20  # Batch size stays strictly under Coinbase rate limits
+CANDLE_BATCH_SIZE = 25
 
 RISK_TIERS = {
     "Low Risk": {
@@ -62,7 +62,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Full-Market Scanner",
+    page_title="Coinbase Full-Market Auto-Refreshing Scanner",
     layout="wide",
 )
 
@@ -87,7 +87,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Continuous full-market engine initialized."
+        st.session_state.last_cycle_note = "Continuous auto-refresh engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -142,7 +142,6 @@ def fetch_all_coinbase_pairs() -> list[str]:
     return sorted(list(set(defaults)))
 
 def fetch_global_prices() -> dict[str, float]:
-    """Pulls current spot prices for ALL markets in 1 API call."""
     prices = {}
     try:
         res = requests.get(f"{BASE_URL}/products", timeout=REQUEST_TIMEOUT)
@@ -390,13 +389,11 @@ def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     all_tokens = fetch_all_coinbase_pairs()
     
-    # 1. Update prices for ALL markets globally in 1 call
     live_prices = fetch_global_prices()
     st.session_state.price_cache.update(live_prices)
     price_map = st.session_state.price_cache
     stats["markets"] = len(all_tokens)
 
-    # 2. Select next batch of candle targets sequentially
     held_tokens = list(st.session_state.positions.keys())
     
     if all_tokens:
@@ -406,7 +403,6 @@ def auto_paper_cycle() -> dict[str, Any]:
     else:
         batch = []
 
-    # Priority: Active positions always get candles evaluated
     scan_candle_targets = list(set(held_tokens + batch))
     
     candles_map = {}
@@ -420,7 +416,6 @@ def auto_paper_cycle() -> dict[str, Any]:
             except Exception:
                 pass
 
-    # 3. Monitor active positions
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
         price = price_map.get(token_id, pos.get("last_price", pos["entry_price"]))
@@ -448,7 +443,6 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "ATR Dynamic Trailing stop triggered."):
                 stats["sells"] += 1
 
-    # 4. Scan candidate breakouts
     candidates_map = {}
     active_strategies = st.session_state.strategies
     
@@ -496,7 +490,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Tracking all {len(all_tokens)} USD markets globally (Candle batch window: {len(batch)} pairs)."
+    st.session_state.last_cycle_note = f"Tracking all {len(all_tokens)} USD markets globally (Active candle batch: {len(batch)} pairs)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -505,7 +499,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Continuous Full Market Scanning • Anti-Churn Protection • Dynamic ATR Stops")
+    st.caption("Continuous Full Market Scanning • Auto-Refreshes every 30s • ATR Trailing Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -561,7 +555,7 @@ def render_live_dashboard() -> None:
     st.subheader("Active Positions")
     rows = []
     for tid, pos in st.session_state.positions.items():
-        curr_p = prices.get(tid, pos.get("entry_price", curr_p))
+        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
         entry_p = float(pos.get("entry_price", curr_p))
         val = float(pos["quantity"]) * curr_p
         pnl_pos = val - float(pos["cost_usd"])
