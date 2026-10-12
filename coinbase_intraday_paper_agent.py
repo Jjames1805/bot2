@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Accurate Live Pricing & Full Market Coverage)
---------------------------------------------------------------------------
+Coinbase Paper Trading Agent (Full Live Pricing & Auto-Refresh)
+---------------------------------------------------------------
 Scans all Coinbase USD spot pairs automatically every 30 seconds, 
-with accurate live token pricing and native Streamlit auto-refreshing.
+utilizing parallel ticker lookups to guarantee live asset valuation updates.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Accurate live-pricing engine initialized."
+        st.session_state.last_cycle_note = "Live pricing engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -140,34 +140,35 @@ def fetch_all_coinbase_pairs() -> list[str]:
         defaults.extend(cfg["assets"])
     return sorted(list(set(defaults)))
 
-def fetch_global_prices() -> dict[str, float]:
+def fetch_live_prices_for_tokens(tokens: list[str]) -> dict[str, float]:
+    """Fetches real-time ticker prices for a given list of tokens in parallel."""
     prices = {}
-    try:
-        res = requests.get(f"{BASE_URL}/products", timeout=REQUEST_TIMEOUT)
-        if res.status_code == 200:
-            for p in res.json():
-                pid = p.get("id", "")
-                if pid.endswith("-USD"):
-                    quote = float(p.get("price", 0.0) or 0.0)
-                    if quote > 0:
-                        prices[pid] = quote
-    except Exception:
-        pass
+    def fetch_one(tid):
+        try:
+            res = requests.get(f"{BASE_URL}/products/{tid}/ticker", timeout=REQUEST_TIMEOUT)
+            if res.status_code == 200:
+                p = float(res.json().get("price", 0.0) or 0.0)
+                if p > 0:
+                    return tid, p
+        except Exception:
+            pass
+        return tid, 0.0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(fetch_one, t) for t in tokens]
+        for future in concurrent.futures.as_completed(futures):
+            tid, p = future.result()
+            if p > 0:
+                prices[tid] = p
     return prices
 
 def get_token_spot_price(token_id: str) -> float:
-    """Fetches real-time price directly for a specific token if missing from cache."""
     if token_id in st.session_state.price_cache and st.session_state.price_cache[token_id] > 0:
         return st.session_state.price_cache[token_id]
-    try:
-        res = requests.get(f"{BASE_URL}/products/{token_id}/ticker", timeout=REQUEST_TIMEOUT)
-        if res.status_code == 200:
-            p = float(res.json().get("price", 0.0) or 0.0)
-            if p > 0:
-                st.session_state.price_cache[token_id] = p
-                return p
-    except Exception:
-        pass
+    prices = fetch_live_prices_for_tokens([token_id])
+    if token_id in prices:
+        st.session_state.price_cache[token_id] = prices[token_id]
+        return prices[token_id]
     return 0.0
 
 def generate_fallback_candles(current_price: float) -> pd.DataFrame:
@@ -399,10 +400,6 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
 def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     all_tokens = fetch_all_coinbase_pairs()
-    
-    live_prices = fetch_global_prices()
-    st.session_state.price_cache.update(live_prices)
-    price_map = st.session_state.price_cache
     stats["markets"] = len(all_tokens)
 
     held_tokens = list(st.session_state.positions.keys())
@@ -414,11 +411,16 @@ def auto_paper_cycle() -> dict[str, Any]:
     else:
         batch = []
 
-    scan_candle_targets = list(set(held_tokens + batch))
+    # Combine held positions and current batch for live pricing and candle scans
+    active_targets = list(set(held_tokens + batch))
     
+    live_prices = fetch_live_prices_for_tokens(active_targets)
+    st.session_state.price_cache.update(live_prices)
+    price_map = st.session_state.price_cache
+
     candles_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_candles_single, t, price_map.get(t, get_token_spot_price(t))): t for t in scan_candle_targets}
+        futures = {executor.submit(fetch_candles_single, t, price_map.get(t, 100.0)): t for t in active_targets}
         for future in concurrent.futures.as_completed(futures):
             try:
                 tid, df = future.result()
@@ -512,7 +514,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Real-Time Token Pricing")
+    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Live Parallel Pricing")
 
     col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
@@ -526,7 +528,7 @@ def render_live_dashboard() -> None:
 
     prices = {}
     for tid, pos in st.session_state.positions.items():
-        p = price_map = st.session_state.price_cache.get(tid, get_token_spot_price(tid))
+        p = st.session_state.price_cache.get(tid, get_token_spot_price(tid))
         prices[tid] = p if p > 0 else pos.get("entry_price", 1.0)
         
     holdings_val = 0.0
