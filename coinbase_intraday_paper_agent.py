@@ -76,16 +76,19 @@ def load_json(path: Path, default: Any) -> Any:
         if path.exists():
             with path.open("r", encoding="utf-8") as f:
                 return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except Exception:
         pass
     return default
 
 
 def save_json(path: Path, value: Any) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as f:
-        json.dump(value, f, indent=2, ensure_ascii=False)
-    temp.replace(path)
+    try:
+        temp = path.with_suffix(path.suffix + ".tmp")
+        with temp.open("w", encoding="utf-8") as f:
+            json.dump(value, f, indent=2, ensure_ascii=False)
+        temp.replace(path)
+    except Exception as e:
+        st.error(f"Failed to save state: {e}")
 
 
 def load_state() -> dict[str, Any]:
@@ -122,17 +125,20 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_gbp_products() -> list[str]:
-    products = api_get("/products")
-    result = []
-    for item in products:
-        pid = item.get("id", "")
-        if pid.endswith("-GBP") and item.get("status") == "online":
-            result.append(pid)
-    preferred = ["BTC-GBP", "ETH-GBP", "SOL-GBP", "XRP-GBP", "ADA-GBP",
-                 "DOGE-GBP", "LTC-GBP", "LINK-GBP", "AVAX-GBP", "DOT-GBP"]
-    ordered = [p for p in preferred if p in result]
-    ordered.extend(sorted(p for p in result if p not in ordered))
-    return ordered
+    try:
+        products = api_get("/products")
+        result = []
+        for item in products:
+            pid = item.get("id", "")
+            if pid.endswith("-GBP") and item.get("status") == "online":
+                result.append(pid)
+        preferred = ["BTC-GBP", "ETH-GBP", "SOL-GBP", "XRP-GBP", "ADA-GBP",
+                     "DOGE-GBP", "LTC-GBP", "LINK-GBP", "AVAX-GBP", "DOT-GBP"]
+        ordered = [p for p in preferred if p in result]
+        ordered.extend(sorted(p for p in result if p not in ordered))
+        return ordered
+    except Exception:
+        return ["BTC-GBP", "ETH-GBP", "SOL-GBP", "XRP-GBP"]
 
 
 @st.cache_data(ttl=5, show_spinner=False)
@@ -142,19 +148,22 @@ def get_ticker(product_id: str) -> dict[str, Any]:
 
 @st.cache_data(ttl=CANDLE_CACHE_SECONDS, show_spinner=False)
 def get_candles(product_id: str, granularity: int = CANDLE_GRANULARITY) -> pd.DataFrame:
-    raw = api_get(
-        f"/products/{product_id}/candles",
-        params={"granularity": granularity},
-    )
-    if not raw:
+    try:
+        raw = api_get(
+            f"/products/{product_id}/candles",
+            params={"granularity": granularity},
+        )
+        if not raw or not isinstance(raw, list):
+            return pd.DataFrame(columns=["time", "low", "high", "open", "close", "volume"])
+        df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
+        df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
+        for col in ["low", "high", "open", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df = df.dropna(subset=["close", "open", "high", "low"])
+        return df.tail(300).reset_index(drop=True)
+    except Exception:
         return pd.DataFrame(columns=["time", "low", "high", "open", "close", "volume"])
-    df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
-    df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
-    for col in ["low", "high", "open", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df = df.dropna(subset=["close", "open", "high", "low"])
-    return df.tail(300).reset_index(drop=True)
 
 
 def get_price_gbp(product_id: str) -> float:
@@ -166,6 +175,8 @@ def get_price_gbp(product_id: str) -> float:
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or len(df) < 5:
+        return df
     out = df.copy()
     close = out["close"]
     out["ema9"] = close.ewm(span=9, adjust=False).mean()
@@ -325,180 +336,4 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             signal_map[product_id] = {
                 strategy: strategy_signal(candles, strategy) for strategy in STRATEGIES
             }
-            stats["markets"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
-            add_event(state, f"{product_id}: market data error: {exc}", "ERROR")
-
-    for product_id in list(state["positions"].keys()):
-        try:
-            price = price_map.get(product_id) or get_price_gbp(product_id)
-            price_map[product_id] = price
-            pos = state["positions"][product_id]
-            pos["last_price"] = price
-            action, reason = signal_map.get(product_id, {}).get(pos.get("strategy"), ("WAIT", "No signal"))
-            change = price / float(pos["entry_price"]) - 1
-            if action == "SELL" or change <= -0.06 or change >= 0.10:
-                if change <= -0.06:
-                    reason = "Paper stop-loss reached (-6%)."
-                elif change >= 0.10:
-                    reason = "Paper take-profit reached (+10%)."
-                if paper_sell(state, product_id, price, reason):
-                    stats["sells"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
-            add_event(state, f"{product_id}: sell/mark error: {exc}", "ERROR")
-
-    candidates = []
-    for product_id, signals in signal_map.items():
-        if product_id in state["positions"]:
-            continue
-        buy_strategies = [s for s, (action, _) in signals.items() if action == "BUY"]
-        if buy_strategies:
-            try:
-                df = add_indicators(market_data[product_id])
-                row = df.iloc[-2]
-                trend = float(row["ema21"] / row["ema50"] - 1) if row["ema50"] else 0.0
-                score = len(buy_strategies) * 10 + max(-5, min(5, trend * 100))
-                candidates.append((score, product_id, buy_strategies[0]))
-            except Exception:
-                pass
-
-    candidates.sort(reverse=True)
-    for score, product_id, strategy in candidates:
-        if len(state["positions"]) >= MAX_OPEN_POSITIONS:
-            break
-        try:
-            price = price_map[product_id]
-            if paper_buy(state, product_id, price, strategy):
-                stats["buys"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
-            add_event(state, f"{product_id}: simulated buy error: {exc}", "ERROR")
-
-    state["last_cycle"] = utc_now()
-    state["last_cycle_note"] = (
-        f"Scanned {stats['markets']} markets; {stats['buys']} buys, "
-        f"{stats['sells']} sells, {stats['errors']} errors."
-    )
-    state["trades"] = state["trades"][:500]
-    save_json(STATE_FILE, state)
-    save_json(MEMORY_FILE, {
-        "last_updated": utc_now(),
-        "strategies": STRATEGIES,
-        "last_cycle_note": state["last_cycle_note"],
-    })
-    return stats
-
-
-def render_dashboard() -> None:
-    st.title("Coinbase Intraday Paper-Trading Agent")
-    st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
-    state = load_state()
-
-    with st.sidebar:
-        st.subheader("Automatic paper trading")
-        st.write("Automation runs while this page is open.")
-        market_limit = st.slider("Markets scanned per cycle", 5, 50, DEFAULT_MARKET_LIMIT, 5, key="market_limit_internal")
-        st.caption(f"Cycle interval: {CYCLE_SECONDS} seconds")
-        if st.button("Reset paper account to £100", type="secondary", use_container_width=True):
-            state = default_state()
-            add_event(state, "Paper account reset to £100.", "RESET")
-            save_json(STATE_FILE, state)
-            st.rerun()
-
-    prices: dict[str, float] = {}
-    price_errors = []
-    for product_id in list(state["positions"].keys()):
-        try:
-            prices[product_id] = get_price_gbp(product_id)
-        except Exception as exc:
-            price_errors.append(f"{product_id}: {exc}")
-
-    total_value, holdings_value = portfolio_value(state, prices)
-    cash = float(state.get("cash_gbp", 0.0))
-    start = float(state.get("starting_cash_gbp", STARTING_CASH_GBP))
-    pnl = total_value - start
-    score = round(pnl)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total paper portfolio", money(total_value), delta=money(pnl))
-    c2.metric("Available cash", money(cash))
-    c3.metric("Open holdings", money(holdings_value), f"{len(state['positions'])} positions")
-    c4.metric("Score", f"{score:+d} points", "1 point per £1 P/L")
-
-    st.info(
-        f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
-        f"refresh every {CYCLE_SECONDS} seconds  •  "
-        f"{state.get('last_cycle_note', 'Waiting for first scan.')}"
-    )
-    if price_errors:
-        st.warning("Some position prices could not refresh: " + "; ".join(price_errors))
-
-    st.subheader("Open paper positions")
-    positions_rows = []
-    for product_id, pos in state["positions"].items():
-        price = prices.get(product_id, float(pos.get("last_price", pos["entry_price"])))
-        market_value = float(pos["quantity"]) * price
-        unrealised = market_value - float(pos["cost_gbp"])
-        positions_rows.append({
-            "Market": product_id,
-            "Strategy": pos.get("strategy", ""),
-            "Entry (£)": round(float(pos["entry_price"]), 6),
-            "Current (£)": round(price, 6),
-            "Quantity": float(pos["quantity"]),
-            "Value (£)": round(market_value, 2),
-            "Unrealised P/L (£)": round(unrealised, 2),
-        })
-    if positions_rows:
-        st.dataframe(pd.DataFrame(positions_rows), use_container_width=True, hide_index=True)
-    else:
-        st.write("No open positions.")
-
-    st.subheader("Recent paper trades")
-    trades = state.get("trades", [])[:30]
-    if trades:
-        st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
-    else:
-        st.write("No paper trades recorded yet.")
-
-    st.subheader("Automatic trading activity")
-    events = state.get("events", [])[:40]
-    if events:
-        st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True)
-    else:
-        st.write("No activity yet. The first automatic cycle should run shortly.")
-
-    st.subheader("Strategy monitor")
-    monitor_rows = []
-    try:
-        products = get_gbp_products()[:market_limit]
-        for product_id in products[:min(market_limit, 15)]:
-            try:
-                df = get_candles(product_id)
-                sigs = {s: strategy_signal(df, s) for s in STRATEGIES}
-                buys = [s for s, (action, _) in sigs.items() if action == "BUY"]
-                waits = [s for s, (action, _) in sigs.items() if action == "WAIT"]
-                monitor_rows.append({
-                    "Market": product_id,
-                    "Price (£)": round(get_price_gbp(product_id), 6),
-                    "BUY signals": ", ".join(buys) or "—",
-                    "WAIT count": len(waits),
-                    "Data candles": len(df),
-                })
-            except Exception as exc:
-                monitor_rows.append({"Market": product_id, "Error": str(exc)})
-        if monitor_rows:
-            st.dataframe(pd.DataFrame(monitor_rows), use_container_width=True, hide_index=True)
-    except Exception as exc:
-        st.error(f"Could not load market list: {exc}")
-
-    st.caption(
-        "This is an educational paper-trading simulator, not investment advice. "
-        "Fees and fills are estimates; prices can move between scan and simulated execution."
-    )
-
-
-@st.fragment(run_every=CYCLE_SECONDS)
-def continuous_trading_panel() -> None:
-    market_limit = st.session
+            stats["markets"] +=
