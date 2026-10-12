@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-fixed $10 position sizing and transparent, verified portfolio accounting.
+higher-conviction momentum filters and optimized profit targets.
 """
 from __future__ import annotations
 
@@ -34,35 +34,33 @@ REQUEST_TIMEOUT = 3
 RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "stop_loss": -0.05,
-        "take_profit": 0.05,
+        "stop_loss": -0.03,
+        "take_profit": 0.06,  # Wider target to beat fees
         "trailing_distance": 0.02,
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.07,
-        "take_profit": 0.08,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.04,
+        "take_profit": 0.09,
+        "trailing_distance": 0.025,
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.10,
-        "take_profit": 0.12,
-        "trailing_distance": 0.04,
+        "stop_loss": -0.06,
+        "take_profit": 0.14,
+        "trailing_distance": 0.035,
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "stop_loss": -0.15,
+        "stop_loss": -0.08,
         "take_profit": 0.20,
-        "trailing_distance": 0.05,
+        "trailing_distance": 0.045,
     },
 }
 
 BASE_STRATEGIES = [
-    {"name": "EMA Momentum", "fast": 3, "slow": 8},
-    {"name": "RSI Reversal", "rsi_buy": 50, "rsi_sell": 50},
-    {"name": "Bollinger Rebound", "std_dev": 1.5},
-    {"name": "Volume Breakout", "vol_mult": 0.9},
+    {"name": "Strong Momentum", "fast": 5, "slow": 15},
+    {"name": "Trend Breakout", "vol_mult": 1.2},
 ]
 
 st.set_page_config(
@@ -84,9 +82,9 @@ def default_state() -> dict[str, Any]:
         "trades": [],
         "events": [],
         "last_cycle": None,
-        "last_cycle_note": "Clean state initialized.",
+        "last_cycle_note": "Optimized profit engine initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 10,
+        "state_version": 11,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -107,7 +105,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 10:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 11:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -170,7 +168,7 @@ def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
 def get_candles(token_id: str) -> pd.DataFrame:
     try:
         raw = api_get(f"/products/{token_id}/candles", params={"granularity": CANDLE_GRANULARITY})
-        if raw and isinstance(raw, list) and len(raw) > 3:
+        if raw and isinstance(raw, list) and len(raw) > 5:
             df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
             df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
             for col in ["low", "high", "open", "close", "volume"]:
@@ -193,46 +191,35 @@ def get_candles(token_id: str) -> pd.DataFrame:
         "volume": volumes
     })
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or len(df) < 3:
+def add_indicators(df: pd.DataFrame, fast: int = 5, slow: int = 15) -> pd.DataFrame:
+    if df.empty or len(df) < slow:
         return df
     out = df.copy()
     close = out["close"]
-    out["ema_fast"] = close.ewm(span=3, adjust=False).mean()
-    out["ema_slow"] = close.ewm(span=8, adjust=False).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    out["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
-    mid = close.rolling(5).mean()
-    std = close.rolling(5).std(ddof=0).fillna(0.01)
-    out["bb_mid"] = mid
-    out["bb_upper"] = mid + 1.5 * std
-    out["bb_lower"] = mid - 1.5 * std
+    out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
+    out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
+    out["vol_avg"] = out["volume"].rolling(10).mean().fillna(1.0)
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
     data = add_indicators(df)
-    if data.empty:
-        return "BUY", "Default entry."
+    if len(data) < 5:
+        return "WAIT", "Insufficient data."
     row = data.iloc[-1]
-    name = strategy_config.get("name", "EMA Momentum")
     
-    if name == "EMA Momentum":
-        if row["ema_fast"] >= row["ema_slow"]:
-            return "BUY", "Bullish EMA."
-        return "SELL", "Bearish EMA."
-    elif name == "RSI Reversal":
-        if row["rsi"] <= 55:
-            return "BUY", "Favorable RSI."
-        return "SELL", "High RSI."
-    elif name == "Bollinger Rebound":
-        if row["close"] <= row["bb_mid"]:
-            return "BUY", "Support bounce."
-        return "SELL", "Resistance."
+    # Require strong momentum and above-average volume confirmation
+    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.1:
+        return "BUY", "Confirmed momentum breakout."
     
-    return "BUY", "Active trigger."
+    return "WAIT", "Waiting for high-conviction setup."
+
+def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
+    holdings = 0.0
+    for token_id, pos in state.get("positions", {}).items():
+        price = prices.get(token_id, pos.get("last_price", pos.get("entry_price", 0.0)))
+        holdings += float(pos.get("quantity", 0.0)) * float(price)
+    cash = float(state.get("cash_usd", STARTING_CASH_USD))
+    return cash + holdings, holdings
 
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
     cash = float(state["cash_usd"])
@@ -300,7 +287,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 10))
+    scan_tokens = random.sample(tokens, min(len(tokens), 12))
     for token_id in scan_tokens:
         fallback = state["positions"].get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -319,9 +306,18 @@ def auto_paper_cycle() -> dict[str, Any]:
         entry_p = float(pos.get("entry_price", price))
         change = (price / entry_p) - 1 if entry_p > 0 else 0.0
         
-        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"]:
-            reason = "Take-profit target reached." if change >= 0 else "Stop-loss hit."
-            if paper_sell(state, token_id, price, reason):
+        peak = max(pos.get("peak_price", entry_p), price)
+        pos["peak_price"] = peak
+        trailing_stop = peak * (1.0 - tier_cfg["trailing_distance"])
+        
+        if change <= tier_cfg["stop_loss"]:
+            if paper_sell(state, token_id, price, "Stop-loss triggered."):
+                stats["sells"] += 1
+        elif change >= tier_cfg["take_profit"]:
+            if paper_sell(state, token_id, price, "Take-profit target reached."):
+                stats["sells"] += 1
+        elif price <= trailing_stop and peak > entry_p:
+            if paper_sell(state, token_id, price, "Trailing profit secured."):
                 stats["sells"] += 1
 
     candidates = []
@@ -353,7 +349,7 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Verified Ledger Accounting")
+    st.caption("Active Paper Trading Simulator • Optimized Profit Engine")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -372,7 +368,6 @@ def render_dashboard() -> None:
         prices[tid] = get_price_usd(tid, fallback_price=fallback)
         pos["last_price"] = prices[tid]
         
-    # Strictly computed Holdings Market Value = sum(quantity * current_price)
     holdings_val = 0.0
     for tid, pos in state["positions"].items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
@@ -389,13 +384,12 @@ def render_dashboard() -> None:
 
     st.info(f"Last Cycle: {state.get('last_cycle')} UTC — {state.get('last_cycle_note')}")
 
-    # Transparent Ledger Summary
     st.subheader("Portfolio Ledger Breakdown")
     ledger_df = pd.DataFrame([
         {"Metric": "Starting Capital", "Amount": money(STARTING_CASH_USD)},
         {"Metric": "Available Cash", "Amount": money(cash)},
         {"Metric": "Holdings Market Value", "Amount": money(holdings_val)},
-        {"Metric": "Total Portfolio Value (Cash + Holdings)", "Amount": money(total_val)},
+        {"Metric": "Total Portfolio Value", "Amount": money(total_val)},
         {"Metric": "Total Net P/L", "Amount": money(pnl)},
     ])
     st.dataframe(ledger_df, use_container_width=True, hide_index=True)
@@ -420,7 +414,7 @@ def render_dashboard() -> None:
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.write("No open positions.")
+        st.write("Scanning for next high-conviction trade opportunity...")
 
     st.subheader("Recent Executed Trades")
     trades = state.get("trades", [])[:20]
