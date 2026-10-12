@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk-weighted capital allocation
-with balanced token classification and pristine bankroll accounting.
+with correct metric delta coloring and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -73,7 +73,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 def money(value: float) -> str:
-    return f"${float(value):,.2f}"
+    val = float(value)
+    if val < 0:
+        return f"-${abs(val):,.2f}"
+    return f"${val:,.2f}"
 
 def init_session_state() -> None:
     if "realized_pnl" not in st.session_state:
@@ -125,7 +128,6 @@ def classify_token_tier(token_id: str) -> str:
     for tier_name, config in RISK_TIERS.items():
         if token_id in config["assets"]:
             return tier_name
-    # Distribute discovered/dynamic tokens across tiers based on hash
     tiers = list(RISK_TIERS.keys())
     idx = abs(hash(token_id)) % len(tiers)
     return tiers[idx]
@@ -337,7 +339,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Balanced Tier Classification")
+    st.caption("Active Paper Trading Simulator • Corrected Delta Coloring")
     
     col1, col2 = st.columns([3, 1])
     with col2:
