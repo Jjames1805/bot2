@@ -32,32 +32,32 @@ MAX_OPEN_POSITIONS = 20
 MIN_POSITION_USD = 2.0
 REQUEST_TIMEOUT = 5
 
-# 4-Tier Risk Classification (25% capital allocation per tier)
+# Rebalanced 4-Tier Risk Classification (25% capital allocation per tier)
 RISK_TIERS = {
     "Low Risk": {
         "allocation_fraction": 0.25,
-        "assets": ["BTC-USD", "ETH-USD"],
+        "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "stop_loss": -0.05,
         "take_profit": 0.12,
         "trailing_distance": 0.03,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
-        "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "LTC-USD"],
+        "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
         "stop_loss": -0.08,
         "take_profit": 0.20,
         "trailing_distance": 0.04,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
-        "assets": ["LINK-USD", "AVAX-USD", "DOT-USD", "DOGE-USD"],
+        "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
         "stop_loss": -0.12,
         "take_profit": 0.30,
         "trailing_distance": 0.05,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
-        "assets": [],  # Populated dynamically
+        "assets": [],  # Populated dynamically from remaining small-cap altcoins
         "stop_loss": -0.18,
         "take_profit": 0.45,
         "trailing_distance": 0.07,
@@ -378,9 +378,10 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles: dict[str, pd.DataFrame] = {}
     active_strategies = get_active_strategies()
     
-    scan_tokens = tokens[:20] 
+    # Shuffle or sample tokens to ensure a diverse spread across tiers rather than always scanning the same ones first
+    sampled_tokens = random.sample(tokens, min(len(tokens), 25))
 
-    for token_id in scan_tokens:
+    for token_id in sampled_tokens:
         try:
             price_map[token_id] = get_price_usd(token_id)
             market_candles[token_id] = get_candles(token_id)
