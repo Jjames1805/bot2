@@ -1,9 +1,8 @@
 """
-Coinbase intraday paper-trading agent (Optimized Fee & Evolving Mode)
---------------------------------------------------------------------
-Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with reduced fee drag (0.1%),
-active strategy mutation, and multi-tier rotation.
+Coinbase intraday paper-trading agent (High-Profit Momentum & Trailing Mode)
+--------------------------------------------------------------------------
+Paper trading only. Combines volume-weighted breakout filters with dynamic
+trailing stops and 4-tier risk allocation (25% each) to capture maximum momentum.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ STATE_FILE = APP_DIR / "paper_state.json"
 MEMORY_FILE = APP_DIR / "strategy_memory.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_GBP = 100.0
-FEE_RATE = 0.001  # Reduced from 0.006 to 0.001 (0.1%) to prevent fee drag
+FEE_RATE = 0.001  # Optimized 0.1% fee rate to prevent drag
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300
 MAX_OPEN_POSITIONS = 20
@@ -39,25 +38,29 @@ RISK_TIERS = {
         "allocation_fraction": 0.25,
         "assets": ["BTC-GBP", "ETH-GBP"],
         "stop_loss": -0.05,
-        "take_profit": 0.10,
+        "take_profit": 0.12,
+        "trailing_distance": 0.03,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SOL-GBP", "XRP-GBP", "ADA-GBP", "LTC-GBP"],
         "stop_loss": -0.08,
-        "take_profit": 0.16,
+        "take_profit": 0.20,
+        "trailing_distance": 0.04,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["LINK-GBP", "AVAX-GBP", "DOT-GBP", "DOGE-GBP"],
         "stop_loss": -0.12,
-        "take_profit": 0.24,
+        "take_profit": 0.30,
+        "trailing_distance": 0.05,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
         "assets": [],  # Populated dynamically from remaining exchange altcoins
         "stop_loss": -0.18,
-        "take_profit": 0.35,
+        "take_profit": 0.45,
+        "trailing_distance": 0.07,
     },
 }
 
@@ -65,11 +68,11 @@ BASE_STRATEGIES = [
     {"name": "EMA Momentum", "fast": 9, "slow": 21},
     {"name": "RSI Reversal", "rsi_buy": 35, "rsi_sell": 75},
     {"name": "Bollinger Rebound", "std_dev": 2.0},
-    {"name": "Volume Breakout", "vol_mult": 1.3},
+    {"name": "Volume Breakout", "vol_mult": 1.5},
     {"name": "Trend Pullback", "ema_filter": 50},
 ]
 
-st.set_page_config(page_title="Coinbase Paper Trading Agent (Self-Evolving)", layout="wide")
+st.set_page_config(page_title="Coinbase Paper Trading Agent (High-Profit Evolving)", layout="wide")
 
 
 def utc_now() -> str:
@@ -226,6 +229,7 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     slow = strategy_config.get("slow", 21)
     rsi_buy = strategy_config.get("rsi_buy", 35)
     rsi_sell = strategy_config.get("rsi_sell", 75)
+    vol_mult = strategy_config.get("vol_mult", 1.5)
 
     data = add_indicators(df, fast=fast, slow=slow)
     row = data.iloc[-2]
@@ -234,25 +238,29 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     if not np.isfinite(row["close"]) or row["close"] <= 0:
         return "WAIT", "Candle data incomplete."
 
+    # Strict Volume Filter: Prevent entry unless volume is robustly backing the move
+    vol_confirmed = row["volume"] > (row["vol_avg20"] * vol_mult) if row["vol_avg20"] > 0 else True
+    if not vol_confirmed:
+        return "WAIT", "Volume below institutional confirmation threshold."
+
     if name == "EMA Momentum":
         if row["ema_fast"] > row["ema_slow"] and prev["ema_fast"] <= prev["ema_slow"]:
-            return "BUY", f"Mutated EMA ({fast}/{slow}) bullish cross."
+            return "BUY", f"Volume-confirmed EMA ({fast}/{slow}) bullish cross."
         if row["ema_fast"] < row["ema_slow"]:
-            return "SELL", f"Mutated EMA ({fast}/{slow}) bearish cross."
+            return "SELL", f"EMA ({fast}/{slow}) bearish cross."
     elif name == "RSI Reversal":
         if prev["rsi"] < rsi_buy and row["rsi"] >= rsi_buy:
-            return "BUY", f"Mutated RSI recovered above {rsi_buy}."
+            return "BUY", f"Volume-backed RSI recovery above {rsi_buy}."
         if row["rsi"] > rsi_sell:
-            return "SELL", f"Mutated RSI exceeded {rsi_sell}."
+            return "SELL", f"RSI exceeded {rsi_sell}."
     elif name == "Bollinger Rebound":
         if prev["close"] < prev["bb_lower"] and row["close"] >= prev["bb_lower"]:
-            return "BUY", "Rebound inside lower Bollinger Band."
+            return "BUY", "Volume-backed rebound inside lower Bollinger Band."
         if row["close"] >= row["bb_upper"]:
             return "SELL", "Reached upper Bollinger Band."
     elif name == "Volume Breakout":
-        vol_ok = row["volume"] > row["vol_avg20"] * 1.2 if row["vol_avg20"] > 0 else False
-        if vol_ok and row["close"] > data.iloc[-22:-2]["high"].max():
-            return "BUY", "High-volume breakout."
+        if row["close"] > data.iloc[-22:-2]["high"].max():
+            return "BUY", "High-volume breakout confirmed."
         if row["close"] < row["ema_slow"]:
             return "SELL", "Price broke below slow EMA."
     elif name == "Trend Pullback":
@@ -260,11 +268,11 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
         near_ema = row["close"] >= row["ema_slow"] * 0.995
         recovered = row["close"] > row["open"] and prev["close"] <= prev["ema_fast"]
         if uptrend and near_ema and recovered:
-            return "BUY", "Mutated uptrend pullback recovery."
+            return "BUY", "Volume-confirmed trend pullback recovery."
         if row["close"] < row["ema50"]:
             return "SELL", "Trend broken below EMA 50."
 
-    return "WAIT", "No mutated trigger."
+    return "WAIT", "No volume-confirmed trigger."
 
 
 def get_active_strategies() -> list[dict[str, Any]]:
@@ -292,8 +300,8 @@ def mutate_strategies() -> None:
                 strat["slow"] = random.randint(14, 35)
             elif name == "RSI Reversal":
                 strat["rsi_buy"] = random.randint(25, 42)
-            elif name == "Trend Pullback":
-                strat["fast"] = random.randint(5, 10)
+            elif name == "Volume Breakout":
+                strat["vol_mult"] = round(random.uniform(1.2, 1.8), 2)
         mutated.append(strat)
 
     memory["active_strategies"] = mutated
@@ -334,6 +342,7 @@ def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy_nam
         "tier": tier,
         "entry_price": price,
         "last_price": price,
+        "peak_price": price,  # Initialized for trailing stop-loss management
         "quantity": quantity,
         "cost_gbp": spend,
         "entry_time": utc_now(),
@@ -406,6 +415,7 @@ def auto_paper_cycle() -> dict[str, Any]:
         except Exception:
             pass
 
+    # Trailing Stop-Loss & Dynamic Exit Evaluation
     for product_id in list(state["positions"].keys()):
         try:
             price = price_map.get(product_id) or get_price_gbp(product_id)
@@ -416,20 +426,29 @@ def auto_paper_cycle() -> dict[str, Any]:
             pos["tier"] = tier
             tier_cfg = RISK_TIERS[tier]
             
+            # Update peak price for trailing stop calculation
+            peak = max(pos.get("peak_price", pos["entry_price"]), price)
+            pos["peak_price"] = peak
+
+            trailing_stop_threshold = peak * (1.0 - tier_cfg["trailing_distance"])
+            change = price / float(pos["entry_price"]) - 1
+
             strat_name = pos.get("strategy", "")
             strat_cfg = next((s for s in active_strategies if s["name"] == strat_name), active_strategies[0])
             action, reason = adaptive_strategy_signal(market_candles.get(product_id, pd.DataFrame()), strat_cfg)
-            
-            change = price / float(pos["entry_price"]) - 1
-            if action == "SELL" or change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"]:
-                if change <= tier_cfg["stop_loss"]:
-                    reason = f"[{tier}] Stop-loss hit ({tier_cfg['stop_loss']*100}%)."
-                elif change >= tier_cfg["take_profit"]:
-                    reason = f"[{tier}] Take-profit hit (+{tier_cfg['take_profit']*100}%)."
-                elif action == "SELL":
-                    reason = f"[{tier}] Evolving strategy flipped to SELL."
-                
-                if paper_sell(state, product_id, price, reason):
+
+            # Sell triggers: Trailing stop hit, hard stop-loss hit, or take-profit reached
+            if price <= trailing_stop_threshold and peak > pos["entry_price"]:
+                if paper_sell(state, product_id, price, f"[{tier}] Trailing profit secured from peak {money(peak)}."):
+                    stats["sells"] += 1
+            elif change <= tier_cfg["stop_loss"]:
+                if paper_sell(state, product_id, price, f"[{tier}] Hard stop-loss hit ({tier_cfg['stop_loss']*100}%)."):
+                    stats["sells"] += 1
+            elif change >= tier_cfg["take_profit"]:
+                if paper_sell(state, product_id, price, f"[{tier}] Take-profit target reached (+{tier_cfg['take_profit']*100}%)."):
+                    stats["sells"] += 1
+            elif action == "SELL":
+                if paper_sell(state, product_id, price, f"[{tier}] Evolving strategy flipped to SELL."):
                     stats["sells"] += 1
         except Exception:
             pass
@@ -449,7 +468,7 @@ def auto_paper_cycle() -> dict[str, Any]:
                 try:
                     tier = classify_product_tier(product_id)
                     strat_name = strat["name"]
-                    score = strategy_scores.get(strat_name, 0.0) + 10
+                    score = strategy_scores.get(strat_name, 0.0) + 15
                     candidates.append((score, product_id, strat_name, tier))
                 except Exception:
                     pass
@@ -468,7 +487,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     state["last_cycle"] = utc_now()
     state["last_cycle_note"] = (
         f"Scanned {stats['markets']} markets; {stats['buys']} buys, "
-        f"{stats['sells']} sells. Strategies actively evolving."
+        f"{stats['sells']} sells. Volume-weighted & trailing engine active."
     )
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
@@ -476,8 +495,8 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 
 def render_dashboard() -> None:
-    st.title("Coinbase Paper Trading Agent (Self-Evolving & Risk-Tiered)")
-    st.caption("25% Low | 25% Medium | 25% High | 25% Very High Risk • Optimized 0.1% Fee Drag")
+    st.title("Coinbase Paper Trading Agent (High-Profit Momentum Mode)")
+    st.caption("Volume-Weighted Entries • Trailing Stop-Loss • 4-Tier Risk Allocation (25% each)")
     
     col_top1, col_top2 = st.columns([3, 1])
     with col_top2:
@@ -513,20 +532,21 @@ def render_dashboard() -> None:
         f"{state.get('last_cycle_note', 'Waiting for scan.')}"
     )
 
-    st.subheader("Open Risk-Tiered Positions")
+    st.subheader("Open Risk-Tiered Positions (Trailing Stop Enabled)")
     positions_rows = []
     for product_id, pos in state["positions"].items():
         price = prices.get(product_id, float(pos.get("last_price", pos["entry_price"])))
         market_value = float(pos["quantity"]) * price
         unrealised = market_value - float(pos["cost_gbp"])
         tier_label = classify_product_tier(product_id)
+        peak = float(pos.get("peak_price", pos["entry_price"]))
         positions_rows.append({
             "Market": product_id,
             "Risk Tier": tier_label,
-            "Evolving Strategy": pos.get("strategy", ""),
+            "Strategy": pos.get("strategy", ""),
             "Entry (£)": round(float(pos["entry_price"]), 6),
+            "Peak (£)": round(peak, 6),
             "Current (£)": round(price, 6),
-            "Value (£)": round(market_value, 2),
             "Unrealised P/L (£)": round(unrealised, 2),
         })
     if positions_rows:
