@@ -36,30 +36,30 @@ RISK_TIERS = {
     "Low Risk": {
         "allocation_fraction": 0.25,
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "stop_loss": -0.02,
-        "take_profit": 0.03,
-        "trailing_distance": 0.015,
+        "stop_loss": -0.05,
+        "take_profit": 0.02,
+        "trailing_distance": 0.01,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.03,
-        "take_profit": 0.05,
-        "trailing_distance": 0.02,
+        "stop_loss": -0.06,
+        "take_profit": 0.025,
+        "trailing_distance": 0.015,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.04,
-        "take_profit": 0.07,
-        "trailing_distance": 0.025,
+        "stop_loss": -0.08,
+        "take_profit": 0.03,
+        "trailing_distance": 0.02,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "stop_loss": -0.06,
-        "take_profit": 0.10,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.10,
+        "take_profit": 0.04,
+        "trailing_distance": 0.025,
     },
 }
 
@@ -91,7 +91,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 2,
+        "state_version": 3,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -112,8 +112,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    # Force reset if state version is old or if legacy positions are detected
-    if not isinstance(state, dict) or state.get("state_version", 1) < 2:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 3:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -274,6 +273,7 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
         "quantity": quantity,
         "cost_usd": spend,
         "entry_time": utc_now(),
+        "cycles_held": 0,
     }
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "token": token_id,
@@ -321,25 +321,23 @@ def auto_paper_cycle() -> dict[str, Any]:
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
-    # Aggressive continuous selling loop to ensure constant turnover and active cycling
+    # Guaranteed turnover: increment cycle age and force sell positions after 2 cycles
     for token_id in list(state["positions"].keys()):
         price = price_map.get(token_id) or get_price_usd(token_id)
         price_map[token_id] = price
         pos = state["positions"][token_id]
         pos["last_price"] = price
+        pos["cycles_held"] = pos.get("cycles_held", 0) + 1
+        
         tier = classify_token_tier(token_id)
         tier_cfg = RISK_TIERS[tier]
-        
-        peak = max(pos.get("peak_price", pos["entry_price"]), price)
-        pos["peak_price"] = peak
         change = price / float(pos["entry_price"]) - 1
         
-        # Sell immediately if hit stop loss, take profit, or randomly rotate to keep cycling
-        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or change > 0.008 or random.random() > 0.4:
-            if paper_sell(state, token_id, price, "Intraday cycle rotation."):
+        # Sell if take-profit, stop-loss, or forced rotation after 2 cycles
+        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or pos["cycles_held"] >= 2:
+            if paper_sell(state, token_id, price, "Cycle rotation / Target reached."):
                 stats["sells"] += 1
 
-    # Continuous buying loop
     candidates = []
     for token_id, df in market_candles.items():
         if token_id in state["positions"]:
