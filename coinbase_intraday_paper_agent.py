@@ -1,19 +1,18 @@
 """
-Coinbase Production-Grade Paper Trading Agent (Full Market Scan)
-----------------------------------------------------------------
-Scans ALL Coinbase USD markets using async batching, dynamic rate limiting,
-anti-churn fee protection, ATR stops, and self-evolving genetic algorithms.
+Coinbase Simplified Full-Market Paper Trading Agent
+--------------------------------------------------
+Scans all Coinbase USD markets safely using built-in parallel threads,
+anti-churn fee protection, ATR dynamic trailing stops, and genetic evolution.
 """
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
 import math
 import random
 import time
 from datetime import datetime, timezone
 from typing import Any
 
-import aiohttp
 import numpy as np
 import pandas as pd
 import requests
@@ -23,8 +22,8 @@ BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
 CYCLE_SECONDS = 30
-CANDLE_GRANULARITY = 14400  # 4-hour candles
-CONCURRENCY_LIMIT = 8  # Safe concurrency limit for public REST API
+CANDLE_GRANULARITY = 14400
+REQUEST_TIMEOUT = 2
 
 RISK_TIERS = {
     "Low Risk": {
@@ -62,7 +61,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Async Full Market Scanner",
+    page_title="Coinbase Full-Market Scanner",
     layout="wide",
 )
 
@@ -87,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Async Full Market Scanner initialized."
+        st.session_state.last_cycle_note = "Full-market scanner initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -133,59 +132,56 @@ def fetch_all_coinbase_pairs() -> list[str]:
     except Exception:
         pass
     
-    # Fallback to defaults if network fetch fails
     defaults = []
     for cfg in RISK_TIERS.values():
         defaults.extend(cfg["assets"])
     return list(set(defaults))
 
-async def fetch_token_data_async(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, token_id: str) -> tuple[str, float, pd.DataFrame]:
-    async with semaphore:
-        ticker_url = f"{BASE_URL}/products/{token_id}/ticker"
-        candles_url = f"{BASE_URL}/products/{token_id}/candles?granularity={CANDLE_GRANULARITY}"
-        headers = {"User-Agent": "CoinbaseAsyncScanner/1.0"}
+def fetch_single_token_data(token_id: str) -> tuple[str, float, pd.DataFrame]:
+    headers = {"User-Agent": "CoinbaseSimpleScanner/1.0"}
+    price = 0.0
+    df = pd.DataFrame()
+    
+    try:
+        res = requests.get(f"{BASE_URL}/products/{token_id}/ticker", headers=headers, timeout=REQUEST_TIMEOUT)
+        if res.status_code == 200:
+            price = float(res.json().get("price", 0.0))
+    except Exception:
+        pass
         
-        price = 0.0
-        df = pd.DataFrame()
+    try:
+        res = requests.get(f"{BASE_URL}/products/{token_id}/candles?granularity={CANDLE_GRANULARITY}", headers=headers, timeout=REQUEST_TIMEOUT)
+        if res.status_code == 200:
+            raw = res.json()
+            if raw and isinstance(raw, list) and len(raw) > 5:
+                df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
+                df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
+                for col in ["low", "high", "open", "close", "volume"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+                df = df.tail(100).reset_index(drop=True)
+    except Exception:
+        pass
         
-        try:
-            async with session.get(ticker_url, headers=headers, timeout=2) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    price = float(data.get("price", 0.0))
-        except Exception:
-            pass
-            
-        try:
-            async with session.get(candles_url, headers=headers, timeout=2) as resp:
-                if resp.status == 200:
-                    raw = await resp.json()
-                    if raw and isinstance(raw, list) and len(raw) > 5:
-                        df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
-                        df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
-                        for col in ["low", "high", "open", "close", "volume"]:
-                            df[col] = pd.to_numeric(df[col], errors="coerce")
-                        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-                        df = df.tail(100).reset_index(drop=True)
-        except Exception:
-            pass
-            
-        return token_id, price, df
+    return token_id, price, df
 
-async def scan_entire_market_async(tokens: list[str]) -> tuple[dict[str, float], dict[str, pd.DataFrame]]:
-    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_token_data_async(session, semaphore, t) for t in tokens]
-        results = await asyncio.gather(*tasks)
-        
+def scan_entire_market(tokens: list[str]) -> tuple[dict[str, float], dict[str, pd.DataFrame]]:
     price_map = {}
     candles_map = {}
-    for tid, price, df in results:
-        if price > 0:
-            price_map[tid] = price
-        if not df.empty:
-            candles_map[tid] = df
-            
+    
+    # Use built-in ThreadPoolExecutor to fetch data in parallel safely
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fetch_single_token_data, t): t for t in tokens}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                tid, price, df = future.result()
+                if price > 0:
+                    price_map[tid] = price
+                if not df.empty:
+                    candles_map[tid] = df
+            except Exception:
+                pass
+                
     return price_map, candles_map
 
 def classify_token_tier(token_id: str) -> str:
@@ -399,11 +395,9 @@ def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     all_tokens = fetch_all_coinbase_pairs()
     
-    # Run async scan of ALL Coinbase pairs concurrently
-    price_map, market_candles = asyncio.run(scan_entire_market_async(all_tokens))
+    price_map, market_candles = scan_entire_market(all_tokens)
     stats["markets"] = len(price_map)
 
-    # Monitor active open positions
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
         price = price_map.get(token_id, pos.get("last_price", pos["entry_price"]))
@@ -431,7 +425,6 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "ATR Dynamic Trailing stop triggered."):
                 stats["sells"] += 1
 
-    # Scan unheld candidates for entry
     candidates_map = {}
     held_tokens = set(st.session_state.positions.keys())
     active_strategies = st.session_state.strategies
@@ -468,7 +461,6 @@ def auto_paper_cycle() -> dict[str, Any]:
                 worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
-                # Anti-churn rule: Only rotate out losing positions (< -1%)
                 if worst_change < -0.01:
                     if paper_sell(worst_tid, worst_curr, f"Rotating out losing position for alpha ({token_id})."):
                         stats["sells"] += 1
@@ -480,7 +472,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Full Async Scan: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Full Scan: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -489,7 +481,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Async Concurrency • Full Market Scan • Anti-Churn Fee Protection • Dynamic ATR Stops")
+    st.caption("Full Market Scan • Built-in Threading • Anti-Churn Protection • ATR Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -527,7 +519,7 @@ def render_live_dashboard() -> None:
 
     st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
 
-    st.subheader("Evolving Strategies Pool (Upgraded TA Genetic Engine)")
+    st.subheader("Evolving Strategies Pool")
     strat_rows = []
     for s in st.session_state.strategies:
         strat_rows.append({
@@ -574,7 +566,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Evolving strategies scanning Coinbase markets for upgraded TA setups...")
+        st.write("Evolving strategies scanning all Coinbase markets...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
