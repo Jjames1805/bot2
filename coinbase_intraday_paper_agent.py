@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-fixed $10 position sizing and bulletproof cash reconciliation.
+fixed $10 position sizing and resilient live execution loops.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ MEMORY_FILE = APP_DIR / "strategy_memory_usd.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 15
 CANDLE_GRANULARITY = 300
 MAX_OPEN_POSITIONS = 5
 POSITION_SIZE_USD = 10.0
@@ -84,7 +84,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 12,
+        "state_version": 13,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -105,7 +105,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 12:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 13:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -207,7 +207,7 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
         return "WAIT", "Insufficient data."
     row = data.iloc[-1]
     
-    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.05:
+    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.02:
         return "BUY", "Confirmed momentum breakout."
     
     return "WAIT", "Waiting for high-conviction setup."
@@ -256,7 +256,6 @@ def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) 
     proceeds = gross - fee
     pnl = proceeds - float(pos["cost_usd"])
     
-    # Ensure cash accurately receives cost basis plus realized pnl
     state["cash_usd"] = float(state["cash_usd"]) + float(pos["cost_usd"]) + pnl
     state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
     
@@ -280,7 +279,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 12))
+    scan_tokens = random.sample(tokens, min(len(tokens), 15))
     for token_id in scan_tokens:
         fallback = state["positions"].get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -340,9 +339,10 @@ def auto_paper_cycle() -> dict[str, Any]:
     save_json(STATE_FILE, state)
     return stats
 
-def render_dashboard() -> None:
+@st.fragment(run_every=CYCLE_SECONDS)
+def render_live_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Reconciled Cash Accounting")
+    st.caption("Active Paper Trading Simulator • Live Fragment Polling Enabled")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -417,9 +417,7 @@ def render_dashboard() -> None:
         st.write("No trades executed yet.")
 
 def main() -> None:
-    render_dashboard()
-    time.sleep(CYCLE_SECONDS)
-    st.rerun()
+    render_live_dashboard()
 
 if __name__ == "__main__":
     main()
