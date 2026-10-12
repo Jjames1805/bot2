@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-fixed $10 position sizing for crystal-clear portfolio accounting.
+fixed $10 position sizing and transparent portfolio accounting.
 """
 from __future__ import annotations
 
@@ -25,36 +25,36 @@ MEMORY_FILE = APP_DIR / "strategy_memory_usd.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 15
+CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300
-MAX_OPEN_POSITIONS = 9
-POSITION_SIZE_USD = 10.0  # Fixed $10 per position so math always adds up
+MAX_OPEN_POSITIONS = 5
+POSITION_SIZE_USD = 10.0
 REQUEST_TIMEOUT = 3
 
 RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "stop_loss": -0.05,
-        "take_profit": 0.03,
-        "trailing_distance": 0.015,
+        "take_profit": 0.05,
+        "trailing_distance": 0.02,
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.06,
-        "take_profit": 0.04,
-        "trailing_distance": 0.02,
+        "stop_loss": -0.07,
+        "take_profit": 0.08,
+        "trailing_distance": 0.03,
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.08,
-        "take_profit": 0.05,
-        "trailing_distance": 0.025,
+        "stop_loss": -0.10,
+        "take_profit": 0.12,
+        "trailing_distance": 0.04,
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "stop_loss": -0.10,
-        "take_profit": 0.06,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.15,
+        "take_profit": 0.20,
+        "trailing_distance": 0.05,
     },
 }
 
@@ -86,7 +86,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 7,
+        "state_version": 9,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -107,7 +107,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 7:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 9:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -239,7 +239,7 @@ def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[fl
     for token_id, pos in state.get("positions", {}).items():
         price = prices.get(token_id, pos.get("last_price", pos.get("entry_price", 0.0)))
         holdings += float(pos.get("quantity", 0.0)) * float(price)
-    cash = float(state.get("cash_usd", 0.0))
+    cash = float(state.get("cash_usd", STARTING_CASH_USD))
     return cash + holdings, holdings
 
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
@@ -267,7 +267,6 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
         "quantity": float(quantity),
         "cost_usd": float(spend),
         "entry_time": utc_now(),
-        "cycles_held": 0,
     }
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "token": token_id,
@@ -322,15 +321,15 @@ def auto_paper_cycle() -> dict[str, Any]:
         price = price_map.get(token_id) or get_price_usd(token_id, fallback_price=fallback)
         price_map[token_id] = price
         pos["last_price"] = price
-        pos["cycles_held"] = pos.get("cycles_held", 0) + 1
         
         tier = classify_token_tier(token_id)
         tier_cfg = RISK_TIERS[tier]
         entry_p = float(pos.get("entry_price", price))
         change = (price / entry_p) - 1 if entry_p > 0 else 0.0
         
-        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or pos["cycles_held"] >= 2:
-            if paper_sell(state, token_id, price, "Cycle rotation / Target reached."):
+        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"]:
+            reason = "Take-profit target reached." if change >= 0 else "Stop-loss hit."
+            if paper_sell(state, token_id, price, reason):
                 stats["sells"] += 1
 
     candidates = []
@@ -362,7 +361,7 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Fixed $10 Sizing • Clean Accounting")
+    st.caption("Active Paper Trading Simulator • Fixed $10 Sizing • Accurate Portfolio Math")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -383,6 +382,8 @@ def render_dashboard() -> None:
         
     total_val, holdings_val = portfolio_value(state, prices)
     cash = float(state.get("cash_usd", STARTING_CASH_USD))
+    
+    # Correct accounting baseline: total value compared against starting capital ($100)
     pnl = total_val - STARTING_CASH_USD
 
     c1, c2, c3 = st.columns(3)
