@@ -1,8 +1,8 @@
 """
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
-Paper trading only. Multi-tier risk allocation with intelligent
-position rotation, live market scanning, and pristine bankroll accounting.
+Paper trading only. Multi-tier risk allocation with full, unconstrained
+Coinbase spot market discovery and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -111,23 +111,28 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return response.json()
 
 def get_all_supported_tokens() -> list[str]:
-    all_tokens = []
+    """Dynamically fetches every active USD spot trading pair directly from Coinbase."""
+    discovered = []
     for cfg in RISK_TIERS.values():
-        all_tokens.extend(cfg["assets"])
+        discovered.extend(cfg["assets"])
     try:
         products = api_get("/products")
-        for item in products:
-            pid = item.get("id", "")
-            if pid.endswith("-USD") and item.get("status") == "online" and pid not in all_tokens:
-                all_tokens.append(pid)
+        if isinstance(products, list):
+            for item in products:
+                pid = item.get("id", "")
+                status = item.get("status", "")
+                # Ensure it's an active USD pair and online
+                if pid.endswith("-USD") and status == "online" and pid not in discovered:
+                    discovered.append(pid)
     except Exception:
         pass
-    return list(set(all_tokens))
+    return list(set(discovered))
 
 def classify_token_tier(token_id: str) -> str:
     for tier_name, config in RISK_TIERS.items():
         if token_id in config["assets"]:
             return tier_name
+    # Automatically categorize any newly discovered Coinbase token across tiers
     tiers = list(RISK_TIERS.keys())
     idx = abs(hash(token_id)) % len(tiers)
     return tiers[idx]
@@ -293,14 +298,14 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 20))
+    # Scan a broad sample of active Coinbase markets each cycle
+    scan_tokens = random.sample(tokens, min(len(tokens), 25))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
-    # 1. Evaluate existing positions for Stop-Loss, Take-Profit, or Trailing Stop
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
         fallback = pos.get("entry_price")
@@ -327,7 +332,6 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "Trailing profit secured."):
                 stats["sells"] += 1
 
-    # 2. Scan market candidates for buy opportunities & intelligent rotation
     candidates = []
     for token_id, df in market_candles.items():
         if token_id in st.session_state.positions:
@@ -338,20 +342,17 @@ def auto_paper_cycle() -> dict[str, Any]:
                 tier = classify_token_tier(token_id)
                 candidates.append((token_id, strat["name"], tier, strength))
 
-    # Sort candidates by signal strength (strongest breakout first)
     candidates.sort(key=lambda x: x[3], reverse=True)
 
     for token_id, strat_name, tier, strength in candidates:
         tier_cfg = RISK_TIERS[tier]
         current_tier_count = count_tier_positions(tier)
         
-        # Opportunity Cost Rotation: If tier is full, check if we should drop the worst-performing position
         if current_tier_count >= tier_cfg["max_positions"]:
             tier_positions = [
                 (tid, p) for tid, p in st.session_state.positions.items() if p.get("tier") == tier
             ]
             if tier_positions:
-                # Find the worst performing position in this tier
                 worst_tid, worst_pos = min(
                     tier_positions,
                     key=lambda x: (price_map.get(x[0], x[1]["last_price"]) / x[1]["entry_price"]) - 1
@@ -359,7 +360,6 @@ def auto_paper_cycle() -> dict[str, Any]:
                 worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
-                # If the worst position is stagnant or negative, rotate out for the new stronger candidate
                 if worst_change < 0.01:
                     if paper_sell(worst_tid, worst_curr, f"Rotating out for higher conviction signal ({token_id})."):
                         stats["sells"] += 1
@@ -369,7 +369,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Active cycle: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -378,7 +378,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Intelligent Position Rotation")
+    st.caption("Active Paper Trading Simulator • Full Coinbase Market Discovery")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -475,7 +475,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Scanning multi-tier markets for high-conviction breakout opportunities...")
+        st.write("Scanning all Coinbase markets for high-conviction breakout opportunities...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
