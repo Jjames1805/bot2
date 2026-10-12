@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn fee protection, genetic strategy evolution, and pristine accounting.
+anti-churn protection, self-evolving genetic strategy pool, and non-blocking UI.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 14400
-REQUEST_TIMEOUT = 3
+REQUEST_TIMEOUT = 2
 
 RISK_TIERS = {
     "Low Risk": {
@@ -85,7 +85,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Anti-churn evolving engine initialized."
+        st.session_state.last_cycle_note = "Non-blocking engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
@@ -102,29 +102,30 @@ def add_event(message: str, kind: str = "INFO") -> None:
     st.session_state.events = st.session_state.events[:250]
 
 def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    response = requests.get(
-        BASE_URL + path,
-        params=params,
-        headers={"User-Agent": "CoinbaseEvolvingAgent/4H", "Accept": "application/json"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(
+            BASE_URL + path,
+            params=params,
+            headers={"User-Agent": "CoinbaseEvolvingAgent/4H", "Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
 
 def get_all_supported_tokens() -> list[str]:
     discovered = []
     for cfg in RISK_TIERS.values():
         discovered.extend(cfg["assets"])
-    try:
-        products = api_get("/products")
-        if isinstance(products, list):
-            for item in products:
-                pid = item.get("id", "")
-                status = item.get("status", "")
-                if pid.endswith("-USD") and status == "online" and pid not in discovered:
-                    discovered.append(pid)
-    except Exception:
-        pass
+    
+    products = api_get("/products")
+    if isinstance(products, list):
+        for item in products:
+            pid = item.get("id", "")
+            status = item.get("status", "")
+            if pid.endswith("-USD") and status == "online" and pid not in discovered:
+                discovered.append(pid)
     return list(set(discovered))
 
 def classify_token_tier(token_id: str) -> str:
@@ -136,30 +137,25 @@ def classify_token_tier(token_id: str) -> str:
     return tiers[idx]
 
 def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
-    try:
-        ticker = api_get(f"/products/{token_id}/ticker")
-        price = float(ticker.get("price", 0))
+    data = api_get(f"/products/{token_id}/ticker")
+    if data and isinstance(data, dict):
+        price = float(data.get("price", 0))
         if math.isfinite(price) and price > 0:
             return price
-    except Exception:
-        pass
-    
+            
     if fallback_price is not None and fallback_price > 0:
         return fallback_price
-    return 1.0
+    return 100.0
 
 def get_candles(token_id: str) -> pd.DataFrame:
-    try:
-        raw = api_get(f"/products/{token_id}/candles", params={"granularity": CANDLE_GRANULARITY})
-        if raw and isinstance(raw, list) and len(raw) > 5:
-            df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
-            df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
-            for col in ["low", "high", "open", "close", "volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            return df.tail(100).reset_index(drop=True)
-    except Exception:
-        pass
+    raw = api_get(f"/products/{token_id}/candles", params={"granularity": CANDLE_GRANULARITY})
+    if raw and isinstance(raw, list) and len(raw) > 5:
+        df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
+        df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
+        for col in ["low", "high", "open", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        return df.tail(100).reset_index(drop=True)
     
     current_p = get_price_usd(token_id)
     times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="4h")
@@ -227,7 +223,7 @@ def evolve_strategies_genetic() -> str:
     }
     
     pool[-1] = mutated_strat
-    add_event(f"🧬 Genetic Evolution: Replaced underperforming strategy with mutated variant {mutated_strat['name']}.", "EVOLVE")
+    add_event(f"🧬 Genetic Evolution: Spawned mutated variant {mutated_strat['name']}.", "EVOLVE")
     return f"Evolved! Spawned {mutated_strat['name']}."
 
 def get_total_cost_basis() -> float:
@@ -333,12 +329,15 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
 def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     tokens = get_all_supported_tokens()
+    if not tokens:
+        tokens = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD"]
     
     price_map = {}
     market_candles = {}
     active_strategies = st.session_state.strategies
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 20))
+    # Restrict batch size to 5 markets per cycle to ensure fast rendering
+    scan_tokens = random.sample(tokens, min(len(tokens), 5))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -399,8 +398,6 @@ def auto_paper_cycle() -> dict[str, Any]:
                 (tid, p) for tid, p in st.session_state.positions.items() if p.get("tier") == tier
             ]
             if tier_positions:
-                # ANTI-CHURN RULE: Only rotate if the worst position is actively LOSING money (< -1%).
-                # Never churn winning or breakeven positions to prevent fee bleed.
                 worst_tid, worst_pos = min(
                     tier_positions,
                     key=lambda x: (price_map.get(x[0], x[1]["last_price"]) / x[1]["entry_price"]) - 1
@@ -417,7 +414,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Anti-Churn Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Non-blocking Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -426,7 +423,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Anti-Churn Fee Protection • Genetic Optimization • 4H Timeframe")
+    st.caption("Fast Render Engine • Anti-Churn Protection • Genetic Optimization")
     
     col1, col2 = st.columns([3, 1])
     with col2:
