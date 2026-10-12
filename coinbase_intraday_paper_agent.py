@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn fee protection, genetic strategy evolution, and colorized P/L HTML cards.
+anti-churn fee protection, genetic strategy evolution, and native Pandas styling.
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Colorized HTML dashboard initialized."
+        st.session_state.last_cycle_note = "Native Pandas styled dashboard initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
@@ -473,7 +473,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Colorized TA Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Native Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -482,7 +482,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Colorized P/L Metrics • Upgraded TA Indicators • ATR Trailing Stops")
+    st.caption("Native Streamlit Styling • Upgraded TA Indicators • ATR Trailing Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -538,84 +538,43 @@ def render_live_dashboard() -> None:
     st.dataframe(pd.DataFrame(strat_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Active Positions")
-    if st.session_state.positions:
-        pos_html = """
-        <table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px;">
-            <tr style="border-bottom: 2px solid #444; text-align: left;">
-                <th style="padding: 8px;">Token</th>
-                <th style="padding: 8px;">Risk Tier</th>
-                <th style="padding: 8px;">Strategy</th>
-                <th style="padding: 8px;">Entry ($)</th>
-                <th style="padding: 8px;">Current ($)</th>
-                <th style="padding: 8px;">Cost Basis ($)</th>
-                <th style="padding: 8px;">Market Val ($)</th>
-                <th style="padding: 8px;">Unrealised P/L ($)</th>
-            </tr>
-        """
-        for tid, pos in st.session_state.positions.items():
-            curr_p = prices.get(tid, pos.get("entry_price", 1.0))
-            entry_p = float(pos.get("entry_price", curr_p))
-            val = float(pos["quantity"]) * curr_p
-            pnl_pos = val - float(pos["cost_usd"])
-            
-            color = "#2e7d32" if pnl_pos >= 0 else "#c62828"
-            pnl_str = f"+${pnl_pos:,.2f}" if pnl_pos >= 0 else f"-${abs(pnl_pos):,.2f}"
-            
-            pos_html += f"""
-            <tr style="border-bottom: 1px solid #333;">
-                <td style="padding: 8px; font-weight: bold;">{tid}</td>
-                <td style="padding: 8px;">{pos.get('tier', 'Medium Risk')}</td>
-                <td style="padding: 8px;">{pos.get('strategy', '')}</td>
-                <td style="padding: 8px;">${entry_p:,.4f}</td>
-                <td style="padding: 8px;">${curr_p:,.4f}</td>
-                <td style="padding: 8px;">${float(pos['cost_usd']):,.2f}</td>
-                <td style="padding: 8px;">${val:,.2f}</td>
-                <td style="padding: 8px; color: {color}; font-weight: bold;">{pnl_str}</td>
-            </tr>
-            """
-        pos_html += "</table>"
-        st.markdown(pos_html, unsafe_allow_html=True)
+    rows = []
+    for tid, pos in st.session_state.positions.items():
+        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
+        entry_p = float(pos.get("entry_price", curr_p))
+        val = float(pos["quantity"]) * curr_p
+        pnl_pos = val - float(pos["cost_usd"])
+        rows.append({
+            "Token": tid,
+            "Risk Tier": pos.get("tier", "Medium Risk"),
+            "Strategy": pos.get("strategy", ""),
+            "Entry ($)": round(entry_p, 4),
+            "Current ($)": round(curr_p, 4),
+            "Cost Basis ($)": round(float(pos["cost_usd"]), 2),
+            "Market Val ($)": round(val, 2),
+            "Unrealised P/L ($)": round(pnl_pos, 2)
+        })
+    
+    if rows:
+        df_pos = pd.DataFrame(rows)
+        def color_pnl(val):
+            if isinstance(val, (int, float)):
+                if val > 0:
+                    return "color: #2e7d32; font-weight: bold;"
+                elif val < 0:
+                    return "color: #c62828; font-weight: bold;"
+            return ""
+
+        styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.write("Evolving strategies scanning Coinbase markets for upgraded TA setups...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
     if trades:
-        trade_html = """
-        <table style="width:100%; border-collapse: collapse; font-family: sans-serif; font-size: 13px;">
-            <tr style="border-bottom: 2px solid #444; text-align: left;">
-                <th style="padding: 6px;">Time (UTC)</th>
-                <th style="padding: 6px;">Side</th>
-                <th style="padding: 6px;">Token</th>
-                <th style="padding: 6px;">Price ($)</th>
-                <th style="padding: 6px;">Value ($)</th>
-                <th style="padding: 6px;">Fee ($)</th>
-                <th style="padding: 6px;">P/L ($)</th>
-                <th style="padding: 6px;">Reason</th>
-            </tr>
-        """
-        for t in trades:
-            pnl = t.get("pnl_usd")
-            pnl_col = "#888"
-            pnl_str = "-"
-            if pnl is not None:
-                pnl_col = "#2e7d32" if pnl >= 0 else "#c62828"
-                pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
-                
-            trade_html += f"""
-            <tr style="border-bottom: 1px solid #333;">
-                <td style="padding: 6px;">{t.get('time', '')}</td>
-                <td style="padding: 6px; font-weight: bold;">{t.get('side', '')}</td>
-                <td style="padding: 6px;">{t.get('token', '')}</td>
-                <td style="padding: 6px;">${float(t.get('price_usd', 0)):,.4f}</td>
-                <td style="padding: 6px;">${float(t.get('value_usd', 0)):,.2f}</td>
-                <td style="padding: 6px;">${float(t.get('fee_usd', 0)):,.4f}</td>
-                <td style="padding: 6px; color: {pnl_col}; font-weight: bold;">{pnl_str}</td>
-                <td style="padding: 6px;">{t.get('reason', '')}</td>
-            </tr>
-            """
-        trade_html += "</table>"
-        st.markdown(trade_html, unsafe_allow_html=True)
+        df_trades = pd.DataFrame(trades)
+        st.dataframe(df_trades, use_container_width=True, hide_index=True)
     else:
         st.write("No trades executed yet.")
 
