@@ -1,9 +1,9 @@
 """
-Coinbase intraday paper-trading agent (Clean Evolving & Risk-Tiered Mode)
-------------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Fixed Multi-Tier Risk-Weighted Mode)
+-------------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with aggressive strategy mutation,
-pruning, and clean table formatting.
+High, and Very High risk buckets (25% each) with active strategy mutation
+and multi-tier position rotation.
 """
 
 from __future__ import annotations
