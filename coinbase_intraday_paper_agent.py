@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk-weighted capital allocation
-with dynamic position sizing and pristine bankroll accounting.
+with balanced token classification and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -24,11 +24,10 @@ CYCLE_SECONDS = 15
 CANDLE_GRANULARITY = 300
 REQUEST_TIMEOUT = 3
 
-# Multi-Tier Risk Allocation & Profit Appetite Configuration
 RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "capital_fraction": 0.20,  # 20% of portfolio capital
+        "capital_fraction": 0.20,
         "max_positions": 3,
         "stop_loss": -0.03,
         "take_profit": 0.05,
@@ -36,7 +35,7 @@ RISK_TIERS = {
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "capital_fraction": 0.30,  # 30% of portfolio capital
+        "capital_fraction": 0.30,
         "max_positions": 4,
         "stop_loss": -0.05,
         "take_profit": 0.08,
@@ -44,7 +43,7 @@ RISK_TIERS = {
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "capital_fraction": 0.30,  # 30% of portfolio capital
+        "capital_fraction": 0.30,
         "max_positions": 4,
         "stop_loss": -0.08,
         "take_profit": 0.12,
@@ -52,7 +51,7 @@ RISK_TIERS = {
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "capital_fraction": 0.20,  # 20% of portfolio capital
+        "capital_fraction": 0.20,
         "max_positions": 3,
         "stop_loss": -0.12,
         "take_profit": 0.20,
@@ -126,7 +125,10 @@ def classify_token_tier(token_id: str) -> str:
     for tier_name, config in RISK_TIERS.items():
         if token_id in config["assets"]:
             return tier_name
-    return "Medium Risk"
+    # Distribute discovered/dynamic tokens across tiers based on hash
+    tiers = list(RISK_TIERS.keys())
+    idx = abs(hash(token_id)) % len(tiers)
+    return tiers[idx]
 
 def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
     try:
@@ -212,11 +214,10 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
     tier_invested = get_tier_current_invested(tier)
     available_tier_cash = tier_budget - tier_invested
     
-    # Position size is dynamically sized based on remaining tier budget and max positions allowed
     target_pos_size = tier_budget / tier_cfg["max_positions"]
     spend = min(available_tier_cash, target_pos_size)
     
-    if spend < 5.0:  # Minimum viable position size check
+    if spend < 5.0:
         return False
     
     fee = spend * FEE_RATE
@@ -278,7 +279,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 18))
+    scan_tokens = random.sample(tokens, min(len(tokens), 20))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -336,7 +337,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Risk-Weighted Capital Distribution")
+    st.caption("Active Paper Trading Simulator • Balanced Tier Classification")
     
     col1, col2 = st.columns([3, 1])
     with col2:
