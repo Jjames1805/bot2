@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn fee protection, genetic strategy evolution, and robust rendering.
+anti-churn fee protection, genetic strategy evolution, and colorized metrics.
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Robust rendering engine initialized."
+        st.session_state.last_cycle_note = "Colorized dashboard initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
@@ -482,7 +482,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Upgraded Technical Indicators • RSI Range Filters • ATR Trailing Stops • BB Squeeze Filters")
+    st.caption("Colorized P/L Metrics • Upgraded TA Indicators • ATR Trailing Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -556,14 +556,37 @@ def render_live_dashboard() -> None:
         })
     
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        df_pos = pd.DataFrame(rows)
+        st.dataframe(
+            df_pos,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Unrealised P/L ($)": st.column_config.NumberColumn(
+                    "Unrealised P/L ($)",
+                    format="$%.2f",
+                )
+            }
+        )
     else:
         st.write("Evolving strategies scanning Coinbase markets for upgraded TA setups...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
     if trades:
-        st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
+        df_trades = pd.DataFrame(trades)
+        column_configs = {}
+        if "pnl_usd" in df_trades.columns:
+            column_configs["pnl_usd"] = st.column_config.NumberColumn("pnl_usd", format="$%.2f")
+        if "fee_usd" in df_trades.columns:
+            column_configs["fee_usd"] = st.column_config.NumberColumn("fee_usd", format="$%.4f")
+            
+        st.dataframe(
+            df_trades,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_configs
+        )
     else:
         st.write("No trades executed yet.")
 
