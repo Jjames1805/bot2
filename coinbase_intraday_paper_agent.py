@@ -78,10 +78,8 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, value: Any) -> None:
     try:
-        temp = path.with_suffix(path.suffix + ".tmp")
-        with temp.open("w", encoding="utf-8") as f:
+        with path.open("w", encoding="utf-8") as f:
             json.dump(value, f, indent=2, ensure_ascii=False)
-        temp.replace(path)
     except Exception as e:
         st.error(f"Failed to save state: {e}")
 
@@ -429,7 +427,6 @@ def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (High-Risk Mode)")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
     
-    # Run the background trading cycle loop every 30 seconds automatically
     continuous_trading_panel()
 
     state = load_state()
