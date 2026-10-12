@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Full Continuous Market Coverage with Auto-Refresh)
-------------------------------------------------------------------------------
-Monitors all Coinbase USD spot pairs, executing automatic updates every 30 seconds,
-anti-churn fee protection, ATR trailing stops, and genetic strategy evolution.
+Coinbase Paper Trading Agent (Stable Manual & Auto Refresh Engine)
+------------------------------------------------------------------
+Scans all Coinbase USD spot pairs reliably with clear diagnostics, 
+genetic strategy tracking, and anti-churn fee protection.
 """
 from __future__ import annotations
 
@@ -21,10 +21,9 @@ import streamlit as st
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 14400
 REQUEST_TIMEOUT = 3
-CANDLE_BATCH_SIZE = 25
+CANDLE_BATCH_SIZE = 30
 
 RISK_TIERS = {
     "Low Risk": {
@@ -62,7 +61,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Full-Market Auto-Refreshing Scanner",
+    page_title="Coinbase Full-Market Scanner",
     layout="wide",
 )
 
@@ -87,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Continuous auto-refresh engine initialized."
+        st.session_state.last_cycle_note = "Stable engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -490,27 +489,33 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Tracking all {len(all_tokens)} USD markets globally (Active candle batch: {len(batch)} pairs)."
+    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Evaluated batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
-@st.fragment(run_every=CYCLE_SECONDS)
-def render_live_dashboard() -> None:
+def main() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Continuous Full Market Scanning • Auto-Refreshes every 30s • ATR Trailing Stops")
-    
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        if st.button("Reset Account & Clear Positions", type="primary", use_container_width=True):
+    st.caption("Full Market Coverage • Manual & Auto Refresh Controls • ATR Trailing Stops")
+
+    # Control Bar
+    col_btn1, col_btn2, col_info = st.columns([1, 1, 2])
+    with col_btn1:
+        if st.button("🔄 Run Market Scan & Refresh Now", type="primary", use_container_width=True):
+            auto_paper_cycle()
+            st.rerun()
+    with col_btn2:
+        if st.button("🗑️ Reset Account", use_container_width=True):
             st.session_state.clear()
             init_session_state()
-            st.success("Account reset successfully!")
+            st.success("Account reset!")
             st.rerun()
 
-    auto_paper_cycle()
-    
+    # Automatically trigger a cycle if none has run yet
+    if st.session_state.last_cycle is None:
+        auto_paper_cycle()
+
     prices = {}
     for tid, pos in st.session_state.positions.items():
         prices[tid] = pos.get("last_price", pos["entry_price"])
@@ -534,7 +539,7 @@ def render_live_dashboard() -> None:
     c2.metric("Available Cash", money(cash))
     c3.metric("Open Positions", f"{len(st.session_state.positions)} active")
 
-    st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
+    st.info(f"Last Cycle: {st.session_state.last_cycle or 'Initializing...'} — {st.session_state.last_cycle_note}")
 
     st.subheader("Evolving Strategies Pool")
     strat_rows = []
@@ -583,7 +588,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Evolving strategies scanning all Coinbase markets...")
+        st.write("Click '🔄 Run Market Scan & Refresh Now' to evaluate all markets and trigger entries.")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
@@ -593,9 +598,12 @@ def render_live_dashboard() -> None:
     else:
         st.write("No trades executed yet.")
 
-def main() -> None:
-    init_session_state()
-    render_live_dashboard()
+    st.subheader("Agent Activity Log")
+    event_rows = []
+    for ev in st.session_state.events[:15]:
+        event_rows.append({"Time (UTC)": ev["time"], "Type": ev["type"], "Message": ev["message"]})
+    if event_rows:
+        st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
