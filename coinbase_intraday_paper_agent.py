@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk-weighted capital allocation
-with color-styled P/L columns and pristine bankroll accounting.
+with strict global cash guardrails and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -192,6 +192,9 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     
     return "WAIT", "Waiting for high-conviction setup."
 
+def get_total_cost_basis() -> float:
+    return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
+
 def get_tier_allocation(tier_name: str) -> float:
     total_bankroll = STARTING_CASH_USD + st.session_state.realized_pnl
     tier_cfg = RISK_TIERS[tier_name]
@@ -212,12 +215,19 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
     if count_tier_positions(tier) >= tier_cfg["max_positions"]:
         return False
     
+    # Check global unallocated cash first
+    total_cost_basis = get_total_cost_basis()
+    global_cash = STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis
+    if global_cash < 5.0:
+        return False
+    
     tier_budget = get_tier_allocation(tier)
     tier_invested = get_tier_current_invested(tier)
     available_tier_cash = tier_budget - tier_invested
     
     target_pos_size = tier_budget / tier_cfg["max_positions"]
-    spend = min(available_tier_cash, target_pos_size)
+    # Spend cannot exceed tier availability, target size, or total remaining global cash
+    spend = min(available_tier_cash, target_pos_size, global_cash)
     
     if spend < 5.0:
         return False
@@ -339,7 +349,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Color-Coded P/L Columns")
+    st.caption("Active Paper Trading Simulator • Strict Global Cash Guardrails")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -368,7 +378,7 @@ def render_live_dashboard() -> None:
         unrealized_pnl += (val - float(pos["cost_usd"]))
 
     total_val = STARTING_CASH_USD + st.session_state.realized_pnl + unrealized_pnl
-    cash = STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis
+    cash = max(0.0, STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis)
     total_net_pnl = st.session_state.realized_pnl + unrealized_pnl
 
     c1, c2, c3 = st.columns(3)
