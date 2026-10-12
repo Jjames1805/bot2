@@ -57,7 +57,7 @@ RISK_TIERS = {
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
-        "assets": [],  # Populated dynamically from remaining small-cap altcoins
+        "assets": [],  # Sampled dynamically
         "stop_loss": -0.18,
         "take_profit": 0.45,
         "trailing_distance": 0.07,
@@ -372,16 +372,22 @@ def auto_paper_cycle() -> dict[str, Any]:
         return stats
     
     explicit_listed = set(RISK_TIERS["Low Risk"]["assets"] + RISK_TIERS["Medium Risk"]["assets"] + RISK_TIERS["High Risk"]["assets"])
-    RISK_TIERS["Very High Risk"]["assets"] = [p for p in tokens if p not in explicit_listed]
+    available_vhr = [p for p in tokens if p not in explicit_listed]
+    RISK_TIERS["Very High Risk"]["assets"] = random.sample(available_vhr, min(len(available_vhr), 5)) if available_vhr else []
     
     price_map: dict[str, float] = {}
     market_candles: dict[str, pd.DataFrame] = {}
     active_strategies = get_active_strategies()
     
-    # Shuffle or sample tokens to ensure a diverse spread across tiers rather than always scanning the same ones first
-    sampled_tokens = random.sample(tokens, min(len(tokens), 25))
-
-    for token_id in sampled_tokens:
+    # Gather a balanced list of tokens across explicit tiers + a limited sample of VHR
+    tier_watchlist = (
+        RISK_TIERS["Low Risk"]["assets"] + 
+        RISK_TIERS["Medium Risk"]["assets"] + 
+        RISK_TIERS["High Risk"]["assets"] + 
+        RISK_TIERS["Very High Risk"]["assets"]
+    )
+    
+    for token_id in tier_watchlist:
         try:
             price_map[token_id] = get_price_usd(token_id)
             market_candles[token_id] = get_candles(token_id)
@@ -452,7 +458,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     state["last_cycle"] = utc_now()
     state["last_cycle_note"] = (
         f"Scanned {stats['markets']} USD spot tokens; {stats['buys']} buys, "
-        f"{stats['sells']} sells. Universal token scan active."
+        f"{stats['sells']} sells. Balanced risk-tier scan active."
     )
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
