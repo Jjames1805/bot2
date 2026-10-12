@@ -1,8 +1,8 @@
 """
-Coinbase Simplified Full-Market Paper Trading Agent
---------------------------------------------------
-Scans all Coinbase USD markets safely using built-in parallel threads,
-anti-churn fee protection, ATR dynamic trailing stops, and genetic evolution.
+Coinbase Non-Blocking Full-Market Paper Trading Agent
+-----------------------------------------------------
+Scans Coinbase USD markets using cached parallel execution to prevent 
+UI freezing and render all dashboard components smoothly.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Full-market scanner initialized."
+        st.session_state.last_cycle_note = "Fast non-blocking scanner initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -116,9 +116,8 @@ def add_event(message: str, kind: str = "INFO") -> None:
     )
     st.session_state.events = st.session_state.events[:250]
 
+@st.cache_data(ttl=300)
 def fetch_all_coinbase_pairs() -> list[str]:
-    if st.session_state.all_tokens_cache:
-        return st.session_state.all_tokens_cache
     try:
         res = requests.get(f"{BASE_URL}/products", timeout=3)
         if res.status_code == 200:
@@ -127,8 +126,8 @@ def fetch_all_coinbase_pairs() -> list[str]:
                 p["id"] for p in products 
                 if p.get("id", "").endswith("-USD") and p.get("status") == "online" and not p.get("trading_disabled", False)
             ]
-            st.session_state.all_tokens_cache = list(set(tokens))
-            return st.session_state.all_tokens_cache
+            if tokens:
+                return list(set(tokens))
     except Exception:
         pass
     
@@ -138,7 +137,7 @@ def fetch_all_coinbase_pairs() -> list[str]:
     return list(set(defaults))
 
 def fetch_single_token_data(token_id: str) -> tuple[str, float, pd.DataFrame]:
-    headers = {"User-Agent": "CoinbaseSimpleScanner/1.0"}
+    headers = {"User-Agent": "CoinbaseFastAgent/1.0"}
     price = 0.0
     df = pd.DataFrame()
     
@@ -165,12 +164,12 @@ def fetch_single_token_data(token_id: str) -> tuple[str, float, pd.DataFrame]:
         
     return token_id, price, df
 
-def scan_entire_market(tokens: list[str]) -> tuple[dict[str, float], dict[str, pd.DataFrame]]:
+@st.cache_data(ttl=25)
+def scan_market_cached(tokens: tuple[str, ...]) -> tuple[dict[str, float], dict[str, pd.DataFrame]]:
     price_map = {}
     candles_map = {}
     
-    # Use built-in ThreadPoolExecutor to fetch data in parallel safely
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch_single_token_data, t): t for t in tokens}
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -395,7 +394,17 @@ def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     all_tokens = fetch_all_coinbase_pairs()
     
-    price_map, market_candles = scan_entire_market(all_tokens)
+    # Priority scan: All active held tokens + risk tier tokens + rotation sample
+    held_tokens = list(st.session_state.positions.keys())
+    tier_tokens = []
+    for cfg in RISK_TIERS.values():
+        tier_tokens.extend(cfg["assets"])
+        
+    other_tokens = [t for t in all_tokens if t not in held_tokens and t not in tier_tokens]
+    sampled_other = random.sample(other_tokens, min(len(other_tokens), 25))
+    scan_target = tuple(set(held_tokens + tier_tokens + sampled_other))
+
+    price_map, market_candles = scan_market_cached(scan_target)
     stats["markets"] = len(price_map)
 
     for token_id in list(st.session_state.positions.keys()):
@@ -426,11 +435,10 @@ def auto_paper_cycle() -> dict[str, Any]:
                 stats["sells"] += 1
 
     candidates_map = {}
-    held_tokens = set(st.session_state.positions.keys())
     active_strategies = st.session_state.strategies
     
     for token_id, df in market_candles.items():
-        if token_id in held_tokens:
+        if token_id in st.session_state.positions:
             continue
         for strat in active_strategies:
             action, _, strength = adaptive_strategy_signal(df, strat)
@@ -472,7 +480,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Full Scan: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Active Scan: {stats['markets']} markets updated, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -481,7 +489,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Scan • Built-in Threading • Anti-Churn Protection • ATR Stops")
+    st.caption("Cached Parallel Execution • Full Market Dynamic Coverage • ATR Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -566,7 +574,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Evolving strategies scanning all Coinbase markets...")
+        st.write("Evolving strategies scanning Coinbase markets...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
