@@ -1,9 +1,9 @@
 """
-Coinbase intraday paper-trading agent (Self-Evolving & Risk-Tiered Mode)
-----------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Accelerated Evolving & Risk-Tiered Mode)
+-----------------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with active strategy mutation
-and rotation.
+High, and Very High risk buckets (25% each) with aggressive strategy mutation,
+pruning, and rotation.
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ RISK_TIERS = {
     },
 }
 
-# Base strategy templates that mutate parameters over time based on performance
 BASE_STRATEGIES = [
     {"name": "EMA Momentum", "fast": 9, "slow": 21},
     {"name": "RSI Reversal", "rsi_buy": 35, "rsi_sell": 75},
@@ -219,7 +218,6 @@ def add_indicators(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> pd.DataFr
 
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
-    """Evaluates strategy rules using mutated parameters stored in memory."""
     if len(df) < 30:
         return "WAIT", f"Need at least 30 candles; received {len(df)}."
     
@@ -270,7 +268,6 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
 
 
 def get_active_strategies() -> list[dict[str, Any]]:
-    """Loads mutated strategy variants from memory or initializes defaults."""
     memory = load_json(MEMORY_FILE, {})
     strategies = memory.get("active_strategies", [])
     if not strategies:
@@ -281,7 +278,7 @@ def get_active_strategies() -> list[dict[str, Any]]:
 
 
 def mutate_strategies() -> None:
-    """Evolutionary mutation: adapts parameters if strategies underperform."""
+    """Aggressive evolutionary mutation: mutates parameters and re-spawns underperforming strategies."""
     memory = load_json(MEMORY_FILE, {})
     strategies = memory.get("active_strategies", BASE_STRATEGIES)
     scores = memory.get("strategy_scores", {})
@@ -290,13 +287,15 @@ def mutate_strategies() -> None:
     for strat in strategies:
         name = strat["name"]
         score = scores.get(name, 0.0)
-        # If strategy score is negative or zero, mutate parameters to evolve
-        if score <= 0:
+        # Aggressive mutation if score is negative
+        if score <= -0.1:
             if name == "EMA Momentum":
-                strat["fast"] = max(3, min(14, strat.get("fast", 9) + random.choice([-1, 1])))
-                strat["slow"] = max(15, min(40, strat.get("slow", 21) + random.choice([-2, 2])))
+                strat["fast"] = random.randint(4, 12)
+                strat["slow"] = random.randint(14, 35)
             elif name == "RSI Reversal":
-                strat["rsi_buy"] = max(20, min(42, strat.get("rsi_buy", 35) + random.choice([-3, 3])))
+                strat["rsi_buy"] = random.randint(25, 42)
+            elif name == "Trend Pullback":
+                strat["fast"] = random.randint(5, 10)
         mutated.append(strat)
 
     memory["active_strategies"] = mutated
@@ -366,7 +365,6 @@ def paper_sell(state: dict[str, Any], product_id: str, price: float, reason: str
     strategy_name = pos.get("strategy", "")
     tier = pos.get("tier", "Medium Risk")
     
-    # Update evolutionary memory scores
     memory = load_json(MEMORY_FILE, {})
     scores = memory.setdefault("strategy_scores", {})
     scores[strategy_name] = scores.get(strategy_name, 0.0) + pnl
@@ -410,7 +408,6 @@ def auto_paper_cycle() -> dict[str, Any]:
         except Exception:
             pass
 
-    # Monitor open positions for evolutionary stop-loss/take-profit or momentum flips
     for product_id in list(state["positions"].keys()):
         try:
             price = price_map.get(product_id) or get_price_gbp(product_id)
@@ -438,7 +435,6 @@ def auto_paper_cycle() -> dict[str, Any]:
         except Exception:
             pass
 
-    # Trigger parameter mutation loop to evolve underperforming strategies
     mutate_strategies()
 
     memory = load_json(MEMORY_FILE, {})
