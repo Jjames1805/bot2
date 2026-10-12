@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-higher-conviction momentum filters and optimized profit targets.
+fixed $10 position sizing and bulletproof cash reconciliation.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "stop_loss": -0.03,
-        "take_profit": 0.06,  # Wider target to beat fees
+        "take_profit": 0.06,
         "trailing_distance": 0.02,
     },
     "Medium Risk": {
@@ -82,9 +82,9 @@ def default_state() -> dict[str, Any]:
         "trades": [],
         "events": [],
         "last_cycle": None,
-        "last_cycle_note": "Optimized profit engine initialized.",
+        "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 11,
+        "state_version": 12,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -105,7 +105,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 11:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 12:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -207,19 +207,10 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
         return "WAIT", "Insufficient data."
     row = data.iloc[-1]
     
-    # Require strong momentum and above-average volume confirmation
-    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.1:
+    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.05:
         return "BUY", "Confirmed momentum breakout."
     
     return "WAIT", "Waiting for high-conviction setup."
-
-def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
-    holdings = 0.0
-    for token_id, pos in state.get("positions", {}).items():
-        price = prices.get(token_id, pos.get("last_price", pos.get("entry_price", 0.0)))
-        holdings += float(pos.get("quantity", 0.0)) * float(price)
-    cash = float(state.get("cash_usd", STARTING_CASH_USD))
-    return cash + holdings, holdings
 
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
     cash = float(state["cash_usd"])
@@ -264,7 +255,9 @@ def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) 
     fee = gross * FEE_RATE
     proceeds = gross - fee
     pnl = proceeds - float(pos["cost_usd"])
-    state["cash_usd"] = float(state["cash_usd"]) + proceeds
+    
+    # Ensure cash accurately receives cost basis plus realized pnl
+    state["cash_usd"] = float(state["cash_usd"]) + float(pos["cost_usd"]) + pnl
     state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
     
     tier = pos.get("tier", "Medium Risk")
@@ -349,7 +342,7 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Optimized Profit Engine")
+    st.caption("Active Paper Trading Simulator • Reconciled Cash Accounting")
     
     col1, col2 = st.columns([3, 1])
     with col2:
