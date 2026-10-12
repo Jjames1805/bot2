@@ -1,8 +1,8 @@
 """
-Coinbase Non-Blocking Full-Market Paper Trading Agent
------------------------------------------------------
-Scans Coinbase USD markets using cached parallel execution to prevent 
-UI freezing and render all dashboard components smoothly.
+Coinbase Paper Trading Agent (Full Continuous Market Coverage)
+--------------------------------------------------------------
+Paper trading only. Monitors all Coinbase USD spot pairs by batching 
+candles sequentially while pulling live prices across all pairs globally.
 """
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 14400
-REQUEST_TIMEOUT = 2
+REQUEST_TIMEOUT = 3
+CANDLE_BATCH_SIZE = 20  # Batch size stays strictly under Coinbase rate limits
 
 RISK_TIERS = {
     "Low Risk": {
@@ -86,11 +87,15 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Fast non-blocking scanner initialized."
+        st.session_state.last_cycle_note = "Continuous full-market engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
         st.session_state.all_tokens_cache = []
+    if "scan_index" not in st.session_state:
+        st.session_state.scan_index = 0
+    if "price_cache" not in st.session_state:
+        st.session_state.price_cache = {}
     
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
@@ -119,7 +124,7 @@ def add_event(message: str, kind: str = "INFO") -> None:
 @st.cache_data(ttl=300)
 def fetch_all_coinbase_pairs() -> list[str]:
     try:
-        res = requests.get(f"{BASE_URL}/products", timeout=3)
+        res = requests.get(f"{BASE_URL}/products", timeout=REQUEST_TIMEOUT)
         if res.status_code == 200:
             products = res.json()
             tokens = [
@@ -127,29 +132,40 @@ def fetch_all_coinbase_pairs() -> list[str]:
                 if p.get("id", "").endswith("-USD") and p.get("status") == "online" and not p.get("trading_disabled", False)
             ]
             if tokens:
-                return list(set(tokens))
+                return sorted(list(set(tokens)))
     except Exception:
         pass
     
     defaults = []
     for cfg in RISK_TIERS.values():
         defaults.extend(cfg["assets"])
-    return list(set(defaults))
+    return sorted(list(set(defaults)))
 
-def fetch_single_token_data(token_id: str) -> tuple[str, float, pd.DataFrame]:
-    headers = {"User-Agent": "CoinbaseFastAgent/1.0"}
-    price = 0.0
-    df = pd.DataFrame()
-    
+def fetch_global_prices() -> dict[str, float]:
+    """Pulls current spot prices for ALL markets in 1 API call."""
+    prices = {}
     try:
-        res = requests.get(f"{BASE_URL}/products/{token_id}/ticker", headers=headers, timeout=REQUEST_TIMEOUT)
+        res = requests.get(f"{BASE_URL}/products", timeout=REQUEST_TIMEOUT)
         if res.status_code == 200:
-            price = float(res.json().get("price", 0.0))
+            for p in res.json():
+                pid = p.get("id", "")
+                if pid.endswith("-USD"):
+                    quote = float(p.get("price", 0.0) or 0.0)
+                    if quote > 0:
+                        prices[pid] = quote
     except Exception:
         pass
-        
+    return prices
+
+def fetch_candles_single(token_id: str) -> tuple[str, pd.DataFrame]:
+    headers = {"User-Agent": "CoinbaseBatchScanner/1.0"}
+    df = pd.DataFrame()
     try:
-        res = requests.get(f"{BASE_URL}/products/{token_id}/candles?granularity={CANDLE_GRANULARITY}", headers=headers, timeout=REQUEST_TIMEOUT)
+        res = requests.get(
+            f"{BASE_URL}/products/{token_id}/candles?granularity={CANDLE_GRANULARITY}",
+            headers=headers,
+            timeout=REQUEST_TIMEOUT
+        )
         if res.status_code == 200:
             raw = res.json()
             if raw and isinstance(raw, list) and len(raw) > 5:
@@ -161,27 +177,7 @@ def fetch_single_token_data(token_id: str) -> tuple[str, float, pd.DataFrame]:
                 df = df.tail(100).reset_index(drop=True)
     except Exception:
         pass
-        
-    return token_id, price, df
-
-@st.cache_data(ttl=25)
-def scan_market_cached(tokens: tuple[str, ...]) -> tuple[dict[str, float], dict[str, pd.DataFrame]]:
-    price_map = {}
-    candles_map = {}
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(fetch_single_token_data, t): t for t in tokens}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                tid, price, df = future.result()
-                if price > 0:
-                    price_map[tid] = price
-                if not df.empty:
-                    candles_map[tid] = df
-            except Exception:
-                pass
-                
-    return price_map, candles_map
+    return token_id, df
 
 def classify_token_tier(token_id: str) -> str:
     for tier_name, config in RISK_TIERS.items():
@@ -394,19 +390,37 @@ def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     all_tokens = fetch_all_coinbase_pairs()
     
-    # Priority scan: All active held tokens + risk tier tokens + rotation sample
+    # 1. Update prices for ALL markets globally in 1 call
+    live_prices = fetch_global_prices()
+    st.session_state.price_cache.update(live_prices)
+    price_map = st.session_state.price_cache
+    stats["markets"] = len(all_tokens)
+
+    # 2. Select next batch of candle targets sequentially
     held_tokens = list(st.session_state.positions.keys())
-    tier_tokens = []
-    for cfg in RISK_TIERS.values():
-        tier_tokens.extend(cfg["assets"])
-        
-    other_tokens = [t for t in all_tokens if t not in held_tokens and t not in tier_tokens]
-    sampled_other = random.sample(other_tokens, min(len(other_tokens), 25))
-    scan_target = tuple(set(held_tokens + tier_tokens + sampled_other))
+    
+    if all_tokens:
+        idx = st.session_state.scan_index
+        batch = all_tokens[idx:idx + CANDLE_BATCH_SIZE]
+        st.session_state.scan_index = (idx + CANDLE_BATCH_SIZE) % len(all_tokens)
+    else:
+        batch = []
 
-    price_map, market_candles = scan_market_cached(scan_target)
-    stats["markets"] = len(price_map)
+    # Priority: Active positions always get candles evaluated
+    scan_candle_targets = list(set(held_tokens + batch))
+    
+    candles_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fetch_candles_single, t): t for t in scan_candle_targets}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                tid, df = future.result()
+                if not df.empty:
+                    candles_map[tid] = df
+            except Exception:
+                pass
 
+    # 3. Monitor active positions
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
         price = price_map.get(token_id, pos.get("last_price", pos["entry_price"]))
@@ -434,10 +448,11 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "ATR Dynamic Trailing stop triggered."):
                 stats["sells"] += 1
 
+    # 4. Scan candidate breakouts
     candidates_map = {}
     active_strategies = st.session_state.strategies
     
-    for token_id, df in market_candles.items():
+    for token_id, df in candles_map.items():
         if token_id in st.session_state.positions:
             continue
         for strat in active_strategies:
@@ -474,13 +489,14 @@ def auto_paper_cycle() -> dict[str, Any]:
                         stats["sells"] += 1
                         stats["rotations"] += 1
 
-        df_cand = market_candles.get(token_id, pd.DataFrame())
+        df_cand = candles_map.get(token_id, pd.DataFrame())
         atr_calc = float(df_cand["close"].iloc[-1] * 0.02) if not df_cand.empty else 0.0
-        if paper_buy(token_id, price_map.get(token_id, 0.0), strat_name, tier, atr_val=atr_calc):
+        p_buy = price_map.get(token_id, 0.0)
+        if p_buy > 0 and paper_buy(token_id, p_buy, strat_name, tier, atr_val=atr_calc):
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Active Scan: {stats['markets']} markets updated, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Tracking all {len(all_tokens)} USD markets globally (Candle batch window: {len(batch)} pairs)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -489,7 +505,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Cached Parallel Execution • Full Market Dynamic Coverage • ATR Stops")
+    st.caption("Continuous Full Market Scanning • Anti-Churn Protection • Dynamic ATR Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -503,8 +519,7 @@ def render_live_dashboard() -> None:
     
     prices = {}
     for tid, pos in st.session_state.positions.items():
-        fallback = pos.get("entry_price")
-        prices[tid] = pos.get("last_price", fallback)
+        prices[tid] = pos.get("last_price", pos["entry_price"])
         
     holdings_val = 0.0
     unrealized_pnl = 0.0
@@ -546,7 +561,7 @@ def render_live_dashboard() -> None:
     st.subheader("Active Positions")
     rows = []
     for tid, pos in st.session_state.positions.items():
-        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
+        curr_p = prices.get(tid, pos.get("entry_price", curr_p))
         entry_p = float(pos.get("entry_price", curr_p))
         val = float(pos["quantity"]) * curr_p
         pnl_pos = val - float(pos["cost_usd"])
@@ -574,7 +589,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Evolving strategies scanning Coinbase markets...")
+        st.write("Evolving strategies scanning all Coinbase markets...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
