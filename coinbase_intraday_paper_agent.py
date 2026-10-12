@@ -1,13 +1,8 @@
 """
-Coinbase intraday paper-trading agent
-------------------------------------
+Coinbase intraday paper-trading agent (High-Risk Mode)
+------------------------------------------------------
 Paper trading only. This app uses public Coinbase Exchange market data and never
 submits real orders. It scans markets and simulates buys/sells while the app is open.
-
-Install:
-    py -m pip install --upgrade streamlit pandas numpy requests
-Run:
-    py -m streamlit run coinbase_intraday_paper_agent.py
 """
 
 from __future__ import annotations
@@ -33,10 +28,10 @@ FEE_RATE = 0.006  # conservative simulated fee estimate per side
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300  # 5-minute candles
 CANDLE_CACHE_SECONDS = 30
-MAX_OPEN_POSITIONS = 12
+MAX_OPEN_POSITIONS = 20
 MIN_POSITION_GBP = 2.0
-MAX_POSITION_FRACTION = 0.40  # of currently available cash
-DEFAULT_MARKET_LIMIT = 20
+MAX_POSITION_FRACTION = 0.75  # Increased risk: up to 75% of available cash per trade
+DEFAULT_MARKET_LIMIT = 40     # Increased market breadth
 REQUEST_TIMEOUT = 12
 
 STRATEGIES = [
@@ -199,8 +194,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def strategy_signal(df: pd.DataFrame, strategy: str) -> tuple[str, str]:
-    if len(df) < 55:
-        return "WAIT", f"Need at least 55 candles; received {len(df)}."
+    if len(df) < 30:  # Lowered threshold for faster high-risk entries
+        return "WAIT", f"Need at least 30 candles; received {len(df)}."
     data = add_indicators(df)
     row = data.iloc[-2]
     prev = data.iloc[-3]
@@ -213,10 +208,10 @@ def strategy_signal(df: pd.DataFrame, strategy: str) -> tuple[str, str]:
             return "SELL", "EMA 9 is below EMA 21."
         return "WAIT", "No fresh bullish EMA crossover."
     if strategy == "RSI Reversal":
-        if prev["rsi"] < 30 and row["rsi"] >= 30:
-            return "BUY", "RSI recovered above 30."
-        if row["rsi"] > 70:
-            return "SELL", "RSI is above 70."
+        if prev["rsi"] < 35 and row["rsi"] >= 35:
+            return "BUY", "RSI recovered above 35."
+        if row["rsi"] > 75:
+            return "SELL", "RSI is above 75."
         return "WAIT", f"RSI is {row['rsi']:.1f}; no reversal trigger."
     if strategy == "Bollinger Rebound":
         if prev["close"] < prev["bb_lower"] and row["close"] >= row["bb_lower"]:
@@ -225,17 +220,17 @@ def strategy_signal(df: pd.DataFrame, strategy: str) -> tuple[str, str]:
             return "SELL", "Price reached the upper Bollinger Band."
         return "WAIT", "No Bollinger rebound trigger."
     if strategy == "Volume Breakout":
-        volume_ok = row["volume"] > row["vol_avg20"] * 1.5 if row["vol_avg20"] > 0 else False
+        volume_ok = row["volume"] > row["vol_avg20"] * 1.3 if row["vol_avg20"] > 0 else False
         if volume_ok and row["close"] > data.iloc[-22:-2]["high"].max():
-            return "BUY", "High-volume close above the recent range."
+            return "BUY", "High-volume close above recent range."
         if row["close"] < row["ema21"]:
             return "SELL", "Price fell below EMA 21."
         return "WAIT", "No high-volume upside breakout."
     if strategy == "Trend Pullback":
         uptrend = row["ema21"] > row["ema50"]
-        near_ema = row["close"] >= row["ema21"] * 0.985
+        near_ema = row["close"] >= row["ema21"] * 0.99
         recovered = row["close"] > row["open"] and prev["close"] <= prev["ema9"]
-        if uptrend and near_ema and recovered and 30 <= row["rsi"] <= 70:
+        if uptrend and near_ema and recovered and 25 <= row["rsi"] <= 75:
             return "BUY", "Pullback recovery in an uptrend."
         if row["close"] < row["ema50"]:
             return "SELL", "Price fell below EMA 50."
@@ -357,18 +352,19 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             pos["last_price"] = price
             action, reason = signal_map.get(product_id, {}).get(pos.get("strategy"), ("WAIT", "No signal"))
             change = price / float(pos["entry_price"]) - 1
-            if action == "SELL" or change <= -0.06 or change >= 0.10:
-                if change <= -0.06:
-                    reason = "Paper stop-loss reached (-6%)."
-                elif change >= 0.10:
-                    reason = "Paper take-profit reached (+10%)."
+            
+            # Wider risk parameters: -12% stop loss, +25% take profit
+            if action == "SELL" or change <= -0.12 or change >= 0.25:
+                if change <= -0.12:
+                    reason = "Paper stop-loss reached (-12%)."
+                elif change >= 0.25:
+                    reason = "Paper take-profit reached (+25%)."
                 if paper_sell(state, product_id, price, reason):
                     stats["sells"] += 1
         except Exception as exc:
             stats["errors"] += 1
             add_event(state, f"{product_id}: sell/mark error: {exc}", "ERROR")
 
-    # Load strategy success scores to incentivize high-performing strategies
     memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
     strategy_scores = memory.get("strategy_scores", {})
 
@@ -384,11 +380,10 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
                     row = df.iloc[-2]
                     trend = float(row["ema21"] / row["ema50"] - 1) if ("ema50" in row and row["ema50"]) else 0.0
                     
-                    # Score incentivization: boost candidates whose strategy has accumulated higher profit scores
                     best_strat = max(buy_strategies, key=lambda s: strategy_scores.get(s, 0.0))
-                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.1)
+                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.15)
 
-                    score = (len(buy_strategies) * 10) + strat_bonus + max(-5, min(5, trend * 100))
+                    score = (len(buy_strategies) * 15) + strat_bonus + max(-10, min(10, trend * 100))
                     candidates.append((score, product_id, best_strat))
             except Exception:
                 pass
@@ -419,7 +414,7 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
 
 
 def render_dashboard() -> None:
-    st.title("Coinbase Intraday Paper-Trading Agent")
+    st.title("Coinbase Intraday Paper-Trading Agent (High-Risk Mode)")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
     state = load_state()
 
@@ -436,7 +431,6 @@ def render_dashboard() -> None:
     start = float(state.get("starting_cash_gbp", STARTING_CASH_GBP))
     pnl = total_value - start
 
-    # 3-column metric layout (Score removed)
     c1, c2, c3 = st.columns(3)
     c1.metric("Total paper portfolio", money(total_value), delta=money(pnl))
     c2.metric("Available cash", money(cash))
