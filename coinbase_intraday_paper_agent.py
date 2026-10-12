@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-1.75x volume filters, intelligent position rotation, and clean accounting.
+1.75x volume filters, duplicate purchase guards, and pristine accounting.
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ import streamlit as st
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 30  # Slower cycle for higher timeframe checks
-CANDLE_GRANULARITY = 14400  # 4-Hour candles (4 * 3600 seconds)
+CYCLE_SECONDS = 30
+CANDLE_GRANULARITY = 14400
 REQUEST_TIMEOUT = 3
 
 RISK_TIERS = {
@@ -60,8 +60,8 @@ RISK_TIERS = {
 }
 
 BASE_STRATEGIES = [
-    {"name": "4H Macro Momentum", "fast": 8, "slow": 21},
-    {"name": "4H Volume Expansion", "vol_mult": 1.75},
+    {"name": "4H Macro Momentum", "fast": 8, "slow": 21, "vol_mult": 1.5},
+    {"name": "4H Volume Expansion", "fast": 5, "slow": 15, "vol_mult": 1.75},
 ]
 
 st.set_page_config(
@@ -194,11 +194,10 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     vol = float(row["volume"])
     vol_avg = float(row["vol_avg"])
     
-    # Strict 1.75x Volume expansion filter + EMA crossover on 4H candles
     required_vol_mult = strategy_config.get("vol_mult", 1.75)
     if ema_fast > ema_slow and vol >= (vol_avg * required_vol_mult):
         strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
-        return "BUY", "Confirmed 4H volume breakout (>=1.75x avg).", strength
+        return "BUY", "Confirmed 4H volume breakout.", strength
     
     return "WAIT", "Waiting for 4H volume expansion.", 0.0
 
@@ -221,8 +220,10 @@ def count_tier_positions(tier_name: str) -> int:
     return sum(1 for pos in st.session_state.positions.values() if pos.get("tier") == tier_name)
 
 def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
+    if token_id in st.session_state.positions:
+        return False
+        
     tier_cfg = RISK_TIERS[tier]
-    
     total_cost_basis = get_total_cost_basis()
     global_cash = STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis
     if global_cash < 5.0:
@@ -331,12 +332,14 @@ def auto_paper_cycle() -> dict[str, Any]:
                 stats["sells"] += 1
 
     candidates = []
+    seen_candidates = set(st.session_state.positions.keys())
     for token_id, df in market_candles.items():
-        if token_id in st.session_state.positions:
+        if token_id in seen_candidates:
             continue
         for strat in active_strategies:
             action, _, strength = adaptive_strategy_signal(df, strat)
-            if action == "BUY":
+            if action == "BUY" and token_id not in seen_candidates:
+                seen_candidates.add(token_id)
                 tier = classify_token_tier(token_id)
                 candidates.append((token_id, strat["name"], tier, strength))
 
@@ -473,7 +476,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Waiting for 4H volume expansion (>=1.75x avg) across Coinbase markets...")
+        st.write("Waiting for 4H volume expansion across Coinbase markets...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
