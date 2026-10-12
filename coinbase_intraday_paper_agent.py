@@ -226,7 +226,6 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     if not np.isfinite(row["close"]) or row["close"] <= 0:
         return "WAIT", "Candle data incomplete."
     
-    # Relaxed volume check to ensure trades occur more readily
     vol_confirmed = row["volume"] >= (row["vol_avg20"] * vol_mult * 0.8) if row["vol_avg20"] > 0 else True
     
     if name == "EMA Momentum":
@@ -469,7 +468,6 @@ def render_dashboard() -> None:
             st.success("Account reset successfully!")
             st.rerun()
 
-    # Automatically run paper cycle on load so trades execute immediately
     auto_paper_cycle()
 
     if st.button("Run Market Scan Now", type="primary"):
@@ -498,6 +496,7 @@ def render_dashboard() -> None:
 
     st.info(
         f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
+        f"Auto-refreshing every {CYCLE_SECONDS}s  •  "
         f"{state.get('last_cycle_note', 'Waiting for scan.')}"
     )
 
@@ -556,6 +555,8 @@ def render_dashboard() -> None:
 
 def main() -> None:
     render_dashboard()
+    time.sleep(CYCLE_SECONDS)
+    st.rerun()
 
 if __name__ == "__main__":
     main()
