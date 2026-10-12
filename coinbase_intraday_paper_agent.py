@@ -1,9 +1,9 @@
 """
-Coinbase intraday paper-trading agent (Accelerated Evolving & Risk-Tiered Mode)
------------------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Clean Evolving & Risk-Tiered Mode)
+------------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
 High, and Very High risk buckets (25% each) with aggressive strategy mutation,
-pruning, and rotation.
+pruning, and clean table formatting.
 """
 
 from __future__ import annotations
@@ -278,7 +278,6 @@ def get_active_strategies() -> list[dict[str, Any]]:
 
 
 def mutate_strategies() -> None:
-    """Aggressive evolutionary mutation: mutates parameters and re-spawns underperforming strategies."""
     memory = load_json(MEMORY_FILE, {})
     strategies = memory.get("active_strategies", BASE_STRATEGIES)
     scores = memory.get("strategy_scores", {})
@@ -287,7 +286,6 @@ def mutate_strategies() -> None:
     for strat in strategies:
         name = strat["name"]
         score = scores.get(name, 0.0)
-        # Aggressive mutation if score is negative
         if score <= -0.1:
             if name == "EMA Momentum":
                 strat["fast"] = random.randint(4, 12)
@@ -536,13 +534,25 @@ def render_dashboard() -> None:
 
     st.subheader("Active Strategy Evolution & Mutated Parameters")
     memory = load_json(MEMORY_FILE, {})
+    
     col_a, col_b = st.columns(2)
     with col_a:
         st.write("**Strategy Profit Scores:**")
-        st.json(memory.get("strategy_scores", {"info": "Accumulating P/L scores..."}))
+        scores_dict = memory.get("strategy_scores", {})
+        if scores_dict:
+            scores_df = pd.DataFrame([{"Strategy": k, "Realized P/L (£)": round(v, 4)} for k, v in scores_dict.items()])
+            st.dataframe(scores_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Accumulating P/L scores from closed trades...")
+
     with col_b:
         st.write("**Mutated Strategy Configurations:**")
-        st.json(memory.get("active_strategies", BASE_STRATEGIES))
+        strats_list = memory.get("active_strategies", BASE_STRATEGIES)
+        if strats_list:
+            strats_df = pd.DataFrame(strats_list)
+            st.dataframe(strats_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No active strategies loaded.")
 
     st.caption("Educational paper-trading simulator. No real orders are sent.")
 
