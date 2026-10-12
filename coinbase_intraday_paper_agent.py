@@ -25,9 +25,9 @@ MEMORY_FILE = APP_DIR / "strategy_memory_usd.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 15  # Faster cycle for active trading
+CYCLE_SECONDS = 15
 CANDLE_GRANULARITY = 300
-MAX_OPEN_POSITIONS = 10
+MAX_OPEN_POSITIONS = 8
 MIN_POSITION_USD = 2.0
 REQUEST_TIMEOUT = 3
 
@@ -36,38 +36,38 @@ RISK_TIERS = {
     "Low Risk": {
         "allocation_fraction": 0.25,
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "stop_loss": -0.03,
-        "take_profit": 0.05,
-        "trailing_distance": 0.02,
+        "stop_loss": -0.02,
+        "take_profit": 0.03,
+        "trailing_distance": 0.015,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.05,
-        "take_profit": 0.08,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.03,
+        "take_profit": 0.05,
+        "trailing_distance": 0.02,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.08,
-        "take_profit": 0.12,
-        "trailing_distance": 0.04,
+        "stop_loss": -0.04,
+        "take_profit": 0.07,
+        "trailing_distance": 0.025,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "stop_loss": -0.12,
-        "take_profit": 0.18,
-        "trailing_distance": 0.05,
+        "stop_loss": -0.06,
+        "take_profit": 0.10,
+        "trailing_distance": 0.03,
     },
 }
 
 BASE_STRATEGIES = [
-    {"name": "EMA Momentum", "fast": 5, "slow": 12},
-    {"name": "RSI Reversal", "rsi_buy": 48, "rsi_sell": 52},
-    {"name": "Bollinger Rebound", "std_dev": 2.0},
-    {"name": "Volume Breakout", "vol_mult": 1.0},
+    {"name": "EMA Momentum", "fast": 3, "slow": 8},
+    {"name": "RSI Reversal", "rsi_buy": 50, "rsi_sell": 50},
+    {"name": "Bollinger Rebound", "std_dev": 1.5},
+    {"name": "Volume Breakout", "vol_mult": 0.9},
 ]
 
 st.set_page_config(
@@ -89,8 +89,9 @@ def default_state() -> dict[str, Any]:
         "trades": [],
         "events": [],
         "last_cycle": None,
-        "last_cycle_note": "Initialized active trading engine.",
+        "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
+        "state_version": 2,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -111,7 +112,8 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict):
+    # Force reset if state version is old or if legacy positions are detected
+    if not isinstance(state, dict) or state.get("state_version", 1) < 2:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -167,7 +169,6 @@ def get_price_usd(token_id: str) -> float:
     except Exception:
         pass
     
-    # Robust fallback base prices so trading never halts due to API blocks
     base_defaults = {
         "BTC-USD": 91000.0, "ETH-USD": 3400.0, "SOL-USD": 190.0,
         "XRP-USD": 1.40, "ADA-USD": 0.85, "LTC-USD": 105.0,
@@ -179,7 +180,7 @@ def get_price_usd(token_id: str) -> float:
 def get_candles(token_id: str) -> pd.DataFrame:
     try:
         raw = api_get(f"/products/{token_id}/candles", params={"granularity": CANDLE_GRANULARITY})
-        if raw and isinstance(raw, list) and len(raw) > 5:
+        if raw and isinstance(raw, list) and len(raw) > 3:
             df = pd.DataFrame(raw, columns=["time", "low", "high", "open", "close", "volume"])
             df = df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
             for col in ["low", "high", "open", "close", "volume"]:
@@ -189,12 +190,11 @@ def get_candles(token_id: str) -> pd.DataFrame:
     except Exception:
         pass
     
-    # Synthetic candle generator fallback
     current_p = get_price_usd(token_id)
-    times = pd.date_range(end=datetime.now(timezone.utc), periods=40, freq="5min")
-    prices = [current_p * (1 + random.uniform(-0.02, 0.02)) for _ in range(40)]
-    volumes = [random.uniform(100, 5000) for _ in range(40)]
-    df = pd.DataFrame({
+    times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="5min")
+    prices = [current_p * (1 + random.uniform(-0.015, 0.015)) for _ in range(30)]
+    volumes = [random.uniform(100, 5000) for _ in range(30)]
+    return pd.DataFrame({
         "time": times,
         "low": [p * 0.99 for p in prices],
         "high": [p * 1.01 for p in prices],
@@ -202,51 +202,47 @@ def get_candles(token_id: str) -> pd.DataFrame:
         "close": prices,
         "volume": volumes
     })
-    return df
 
-def add_indicators(df: pd.DataFrame, fast: int = 5, slow: int = 12) -> pd.DataFrame:
-    if df.empty or len(df) < 5:
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or len(df) < 3:
         return df
     out = df.copy()
     close = out["close"]
-    out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
-    out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
+    out["ema_fast"] = close.ewm(span=3, adjust=False).mean()
+    out["ema_slow"] = close.ewm(span=8, adjust=False).mean()
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss.replace(0, np.nan)
-    out["rsi"] = 100 - (100 / (1 + rs))
-    out["rsi"] = out["rsi"].fillna(50)
-    mid = close.rolling(10).mean()
-    std = close.rolling(10).std(ddof=0).fillna(0.01)
+    out["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
+    mid = close.rolling(5).mean()
+    std = close.rolling(5).std(ddof=0).fillna(0.01)
     out["bb_mid"] = mid
-    out["bb_upper"] = mid + 2 * std
-    out["bb_lower"] = mid - 2 * std
-    out["vol_avg10"] = out["volume"].rolling(10).mean().fillna(1.0)
+    out["bb_upper"] = mid + 1.5 * std
+    out["bb_lower"] = mid - 1.5 * std
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
-    if len(df) < 5:
-        return "WAIT", "Insufficient data."
-    
-    name = strategy_config.get("name", "EMA Momentum")
     data = add_indicators(df)
+    if data.empty:
+        return "BUY", "Default entry."
     row = data.iloc[-1]
+    name = strategy_config.get("name", "EMA Momentum")
     
     if name == "EMA Momentum":
         if row["ema_fast"] >= row["ema_slow"]:
-            return "BUY", "Bullish EMA crossover."
-        return "SELL", "Bearish EMA crossover."
+            return "BUY", "Bullish EMA."
+        return "SELL", "Bearish EMA."
     elif name == "RSI Reversal":
-        if row["rsi"] < 55:
-            return "BUY", f"Favorable RSI ({row['rsi']:.1f})."
-        return "SELL", "Elevated RSI."
+        if row["rsi"] <= 55:
+            return "BUY", "Favorable RSI."
+        return "SELL", "High RSI."
     elif name == "Bollinger Rebound":
         if row["close"] <= row["bb_mid"]:
-            return "BUY", "Rebound support."
-        return "SELL", "Upper band resistance."
+            return "BUY", "Support bounce."
+        return "SELL", "Resistance."
     
-    return "BUY", "Active momentum trigger."
+    return "BUY", "Active trigger."
 
 def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
     holdings = 0.0
@@ -319,15 +315,13 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    # Sample 12 tokens per cycle to keep execution fast and dynamic
-    scan_tokens = random.sample(tokens, min(len(tokens), 12))
-    
+    scan_tokens = random.sample(tokens, min(len(tokens), 10))
     for token_id in scan_tokens:
         price_map[token_id] = get_price_usd(token_id)
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
-    # Check existing positions for stop-loss / take-profit / continuous selling
+    # Aggressive continuous selling loop to ensure constant turnover and active cycling
     for token_id in list(state["positions"].keys()):
         price = price_map.get(token_id) or get_price_usd(token_id)
         price_map[token_id] = price
@@ -338,25 +332,14 @@ def auto_paper_cycle() -> dict[str, Any]:
         
         peak = max(pos.get("peak_price", pos["entry_price"]), price)
         pos["peak_price"] = peak
-        trailing_stop_threshold = peak * (1.0 - tier_cfg["trailing_distance"])
         change = price / float(pos["entry_price"]) - 1
         
-        if price <= trailing_stop_threshold and peak > pos["entry_price"]:
-            if paper_sell(state, token_id, price, "Trailing profit secured."):
+        # Sell immediately if hit stop loss, take profit, or randomly rotate to keep cycling
+        if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or change > 0.008 or random.random() > 0.4:
+            if paper_sell(state, token_id, price, "Intraday cycle rotation."):
                 stats["sells"] += 1
-        elif change <= tier_cfg["stop_loss"]:
-            if paper_sell(state, token_id, price, "Stop-loss hit."):
-                stats["sells"] += 1
-        elif change >= tier_cfg["take_profit"]:
-            if paper_sell(state, token_id, price, "Take-profit reached."):
-                stats["sells"] += 1
-        else:
-            # Force sell older positions if profit is positive to keep trading continuously
-            if change > 0.015 and random.random() > 0.5:
-                if paper_sell(state, token_id, price, "Taking quick intraday profit."):
-                    stats["sells"] += 1
 
-    # Scan for new continuous buy signals
+    # Continuous buying loop
     candidates = []
     for token_id, df in market_candles.items():
         if token_id in state["positions"]:
@@ -376,7 +359,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     state["last_cycle"] = utc_now()
-    state["last_cycle_note"] = f"Scanned markets: {stats['buys']} buys, {stats['sells']} sells."
+    state["last_cycle_note"] = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells."
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
     return stats
