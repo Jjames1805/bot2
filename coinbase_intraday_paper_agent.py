@@ -91,7 +91,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 4,
+        "state_version": 5,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -112,7 +112,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 4:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 5:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -168,7 +168,6 @@ def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
     except Exception:
         pass
     
-    # Safely fallback to last known position price or entry price if API rate-limits
     if fallback_price is not None and fallback_price > 0:
         return fallback_price
         
@@ -265,18 +264,18 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
         "token_id": token_id,
         "strategy": strategy_name,
         "tier": tier,
-        "entry_price": price,
-        "last_price": price,
-        "peak_price": price,
-        "quantity": quantity,
-        "cost_usd": spend,
+        "entry_price": float(price),
+        "last_price": float(price),
+        "peak_price": float(price),
+        "quantity": float(quantity),
+        "cost_usd": float(spend),
         "entry_time": utc_now(),
         "cycles_held": 0,
     }
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "token": token_id,
-        "price_usd": price, "quantity": quantity, "value_usd": spend,
-        "fee_usd": fee, "strategy": strategy_name, "tier": tier, "pnl_usd": None,
+        "price_usd": float(price), "quantity": float(quantity), "value_usd": float(spend),
+        "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
     add_event(state, f"PAPER BUY [{tier}] {token_id} at {money(price)}.", "BUY")
     return True
@@ -296,8 +295,8 @@ def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) 
     tier = pos.get("tier", "Medium Risk")
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER SELL", "token": token_id,
-        "price_usd": price, "quantity": qty, "value_usd": proceeds,
-        "fee_usd": fee, "strategy": pos.get("strategy", ""), "tier": tier, "pnl_usd": pnl,
+        "price_usd": float(price), "quantity": float(qty), "value_usd": float(proceeds),
+        "fee_usd": float(fee), "strategy": pos.get("strategy", ""), "tier": tier, "pnl_usd": float(pnl),
         "reason": reason,
     })
     add_event(state, f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
@@ -315,14 +314,14 @@ def auto_paper_cycle() -> dict[str, Any]:
     
     scan_tokens = random.sample(tokens, min(len(tokens), 10))
     for token_id in scan_tokens:
-        fallback = state["positions"].get(token_id, {}).get("last_price")
+        fallback = state["positions"].get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
     for token_id in list(state["positions"].keys()):
         pos = state["positions"][token_id]
-        fallback = pos.get("last_price", pos["entry_price"])
+        fallback = pos.get("entry_price")
         price = price_map.get(token_id) or get_price_usd(token_id, fallback_price=fallback)
         price_map[token_id] = price
         pos["last_price"] = price
@@ -330,7 +329,8 @@ def auto_paper_cycle() -> dict[str, Any]:
         
         tier = classify_token_tier(token_id)
         tier_cfg = RISK_TIERS[tier]
-        change = price / float(pos["entry_price"]) - 1
+        entry_p = float(pos.get("entry_price", price))
+        change = (price / entry_p) - 1 if entry_p > 0 else 0.0
         
         if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or pos["cycles_held"] >= 2:
             if paper_sell(state, token_id, price, "Cycle rotation / Target reached."):
@@ -350,7 +350,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     for token_id, strat_name, tier in candidates:
         if len(state["positions"]) >= MAX_OPEN_POSITIONS:
             break
-        fallback = state["positions"].get(token_id, {}).get("last_price")
+        fallback = state["positions"].get(token_id, {}).get("entry_price")
         price = price_map.get(token_id, get_price_usd(token_id, fallback_price=fallback))
         if paper_buy(state, token_id, price, strat_name, tier):
             stats["buys"] += 1
@@ -378,7 +378,7 @@ def render_dashboard() -> None:
     
     prices = {}
     for tid, pos in state["positions"].items():
-        fallback = pos.get("last_price", pos["entry_price"])
+        fallback = pos.get("entry_price")
         prices[tid] = get_price_usd(tid, fallback_price=fallback)
         pos["last_price"] = prices[tid]
         
@@ -397,20 +397,21 @@ def render_dashboard() -> None:
     rows = []
     for tid, pos in state["positions"].items():
         curr_p = prices.get(tid, pos["entry_price"])
-        val = pos["quantity"] * curr_p
-        pnl_pos = val - pos["cost_usd"]
+        entry_p = float(pos.get("entry_price", curr_p))
+        val = float(pos["quantity"]) * curr_p
+        pnl_pos = val - float(pos["cost_usd"])
         rows.append({
             "Token": tid,
             "Risk Tier": pos.get("tier", "Medium Risk"),
             "Strategy": pos.get("strategy", ""),
-            "Entry ($)": round(pos["entry_price"], 4),
+            "Entry ($)": round(entry_p, 4),
             "Current ($)": round(curr_p, 4),
             "Unrealised P/L ($)": round(pnl_pos, 2)
         })
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.write("Scanning for next trade opportunity...")
+        st.write("No open positions.")
 
     st.subheader("Recent Executed Trades")
     trades = state.get("trades", [])[:20]
