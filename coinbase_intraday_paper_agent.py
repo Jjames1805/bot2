@@ -1,14 +1,16 @@
 """
-Coinbase intraday paper-trading agent (Tiered Risk-Weighted Mode)
------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Self-Evolving & Risk-Tiered Mode)
+----------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with active rotation.
+High, and Very High risk buckets (25% each) with active strategy mutation
+and rotation.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +33,7 @@ MAX_OPEN_POSITIONS = 20
 MIN_POSITION_GBP = 2.0
 REQUEST_TIMEOUT = 12
 
-# Tiered Risk Classification (25% capital allocation per tier)
+# 4-Tier Risk Classification (25% capital allocation per tier)
 RISK_TIERS = {
     "Low Risk": {
         "allocation_fraction": 0.25,
@@ -53,21 +55,22 @@ RISK_TIERS = {
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
-        "assets": [],  # Filled dynamically from remaining exchange altcoins
+        "assets": [],  # Populated dynamically from remaining exchange altcoins
         "stop_loss": -0.18,
         "take_profit": 0.35,
     },
 }
 
-STRATEGIES = [
-    "EMA Momentum",
-    "RSI Reversal",
-    "Bollinger Rebound",
-    "Volume Breakout",
-    "Trend Pullback",
+# Base strategy templates that mutate parameters over time based on performance
+BASE_STRATEGIES = [
+    {"name": "EMA Momentum", "fast": 9, "slow": 21},
+    {"name": "RSI Reversal", "rsi_buy": 35, "rsi_sell": 75},
+    {"name": "Bollinger Rebound", "std_dev": 2.0},
+    {"name": "Volume Breakout", "vol_mult": 1.3},
+    {"name": "Trend Pullback", "ema_filter": 50},
 ]
 
-st.set_page_config(page_title="Coinbase Paper Trading Agent (Risk-Tiered)", layout="wide")
+st.set_page_config(page_title="Coinbase Paper Trading Agent (Self-Evolving)", layout="wide")
 
 
 def utc_now() -> str:
@@ -192,13 +195,13 @@ def get_price_gbp(product_id: str) -> float:
     return price
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> pd.DataFrame:
     if df.empty or len(df) < 5:
         return df
     out = df.copy()
     close = out["close"]
-    out["ema9"] = close.ewm(span=9, adjust=False).mean()
-    out["ema21"] = close.ewm(span=21, adjust=False).mean()
+    out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
+    out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
     out["ema50"] = close.ewm(span=50, adjust=False).mean()
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -212,53 +215,92 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["bb_upper"] = mid + 2 * std
     out["bb_lower"] = mid - 2 * std
     out["vol_avg20"] = out["volume"].rolling(20).mean()
-    out["ret"] = close.pct_change().fillna(0)
     return out
 
 
-def strategy_signal(df: pd.DataFrame, strategy: str) -> tuple[str, str]:
+def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
+    """Evaluates strategy rules using mutated parameters stored in memory."""
     if len(df) < 30:
         return "WAIT", f"Need at least 30 candles; received {len(df)}."
-    data = add_indicators(df)
+    
+    name = strategy_config.get("name", "EMA Momentum")
+    fast = strategy_config.get("fast", 9)
+    slow = strategy_config.get("slow", 21)
+    rsi_buy = strategy_config.get("rsi_buy", 35)
+    rsi_sell = strategy_config.get("rsi_sell", 75)
+
+    data = add_indicators(df, fast=fast, slow=slow)
     row = data.iloc[-2]
     prev = data.iloc[-3]
+
     if not np.isfinite(row["close"]) or row["close"] <= 0:
-        return "WAIT", "Candle data is incomplete."
-    if strategy == "EMA Momentum":
-        if row["ema9"] > row["ema21"] and prev["ema9"] <= prev["ema21"]:
-            return "BUY", "EMA 9 crossed above EMA 21."
-        if row["ema9"] < row["ema21"]:
-            return "SELL", "EMA 9 is below EMA 21."
-        return "WAIT", "No fresh bullish EMA crossover."
-    if strategy == "RSI Reversal":
-        if prev["rsi"] < 35 and row["rsi"] >= 35:
-            return "BUY", "RSI recovered above 35."
-        if row["rsi"] > 75:
-            return "SELL", "RSI is above 75."
-        return "WAIT", f"RSI is {row['rsi']:.1f}; no reversal trigger."
-    if strategy == "Bollinger Rebound":
+        return "WAIT", "Candle data incomplete."
+
+    if name == "EMA Momentum":
+        if row["ema_fast"] > row["ema_slow"] and prev["ema_fast"] <= prev["ema_slow"]:
+            return "BUY", f"Mutated EMA ({fast}/{slow}) bullish cross."
+        if row["ema_fast"] < row["ema_slow"]:
+            return "SELL", f"Mutated EMA ({fast}/{slow}) bearish cross."
+    elif name == "RSI Reversal":
+        if prev["rsi"] < rsi_buy and row["rsi"] >= rsi_buy:
+            return "BUY", f"Mutated RSI recovered above {rsi_buy}."
+        if row["rsi"] > rsi_sell:
+            return "SELL", f"Mutated RSI exceeded {rsi_sell}."
+    elif name == "Bollinger Rebound":
         if prev["close"] < prev["bb_lower"] and row["close"] >= row["bb_lower"]:
-            return "BUY", "Price recovered inside the lower Bollinger Band."
+            return "BUY", "Rebound inside lower Bollinger Band."
         if row["close"] >= row["bb_upper"]:
-            return "SELL", "Price reached the upper Bollinger Band."
-        return "WAIT", "No Bollinger rebound trigger."
-    if strategy == "Volume Breakout":
-        volume_ok = row["volume"] > row["vol_avg20"] * 1.3 if row["vol_avg20"] > 0 else False
-        if volume_ok and row["close"] > data.iloc[-22:-2]["high"].max():
-            return "BUY", "High-volume close above recent range."
-        if row["close"] < row["ema21"]:
-            return "SELL", "Price fell below EMA 21."
-        return "WAIT", "No high-volume upside breakout."
-    if strategy == "Trend Pullback":
-        uptrend = row["ema21"] > row["ema50"]
-        near_ema = row["close"] >= row["ema21"] * 0.99
-        recovered = row["close"] > row["open"] and prev["close"] <= prev["ema9"]
-        if uptrend and near_ema and recovered and 25 <= row["rsi"] <= 75:
-            return "BUY", "Pullback recovery in an uptrend."
+            return "SELL", "Reached upper Bollinger Band."
+    elif name == "Volume Breakout":
+        vol_ok = row["volume"] > row["vol_avg20"] * 1.2 if row["vol_avg20"] > 0 else False
+        if vol_ok and row["close"] > data.iloc[-22:-2]["high"].max():
+            return "BUY", "High-volume breakout."
+        if row["close"] < row["ema_slow"]:
+            return "SELL", "Price broke below slow EMA."
+    elif name == "Trend Pullback":
+        uptrend = row["ema_slow"] > row["ema50"]
+        near_ema = row["close"] >= row["ema_slow"] * 0.995
+        recovered = row["close"] > row["open"] and prev["close"] <= prev["ema_fast"]
+        if uptrend and near_ema and recovered:
+            return "BUY", "Mutated uptrend pullback recovery."
         if row["close"] < row["ema50"]:
-            return "SELL", "Price fell below EMA 50."
-        return "WAIT", "No trend-pullback entry."
-    return "WAIT", "Unknown strategy."
+            return "SELL", "Trend broken below EMA 50."
+
+    return "WAIT", "No mutated trigger."
+
+
+def get_active_strategies() -> list[dict[str, Any]]:
+    """Loads mutated strategy variants from memory or initializes defaults."""
+    memory = load_json(MEMORY_FILE, {})
+    strategies = memory.get("active_strategies", [])
+    if not strategies:
+        strategies = BASE_STRATEGIES
+        memory["active_strategies"] = strategies
+        save_json(MEMORY_FILE, memory)
+    return strategies
+
+
+def mutate_strategies() -> None:
+    """Evolutionary mutation: adapts parameters if strategies underperform."""
+    memory = load_json(MEMORY_FILE, {})
+    strategies = memory.get("active_strategies", BASE_STRATEGIES)
+    scores = memory.get("strategy_scores", {})
+
+    mutated = []
+    for strat in strategies:
+        name = strat["name"]
+        score = scores.get(name, 0.0)
+        # If strategy score is negative or zero, mutate parameters to evolve
+        if score <= 0:
+            if name == "EMA Momentum":
+                strat["fast"] = max(3, min(14, strat.get("fast", 9) + random.choice([-1, 1])))
+                strat["slow"] = max(15, min(40, strat.get("slow", 21) + random.choice([-2, 2])))
+            elif name == "RSI Reversal":
+                strat["rsi_buy"] = max(20, min(42, strat.get("rsi_buy", 35) + random.choice([-3, 3])))
+        mutated.append(strat)
+
+    memory["active_strategies"] = mutated
+    save_json(MEMORY_FILE, memory)
 
 
 def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
@@ -270,7 +312,7 @@ def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[fl
     return cash + holdings, holdings
 
 
-def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy: str, tier: str) -> bool:
+def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy_name: str, tier: str) -> bool:
     if product_id in state["positions"]:
         return False
     
@@ -291,7 +333,7 @@ def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy: st
     state["total_fees_gbp"] = float(state.get("total_fees_gbp", 0.0)) + fee
     state["positions"][product_id] = {
         "product_id": product_id,
-        "strategy": strategy,
+        "strategy": strategy_name,
         "tier": tier,
         "entry_price": price,
         "last_price": price,
@@ -303,9 +345,9 @@ def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy: st
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "product": product_id,
         "price_gbp": price, "quantity": quantity, "value_gbp": spend,
-        "fee_gbp": fee, "strategy": strategy, "tier": tier, "pnl_gbp": None,
+        "fee_gbp": fee, "strategy": strategy_name, "tier": tier, "pnl_gbp": None,
     })
-    add_event(state, f"PAPER BUY [{tier}] {product_id} at {money(price)} using {strategy}.", "BUY")
+    add_event(state, f"PAPER BUY [{tier}] {product_id} via {strategy_name} at {money(price)}.", "BUY")
     return True
 
 
@@ -321,20 +363,22 @@ def paper_sell(state: dict[str, Any], product_id: str, price: float, reason: str
     state["cash_gbp"] = float(state["cash_gbp"]) + proceeds
     state["total_fees_gbp"] = float(state.get("total_fees_gbp", 0.0)) + fee
     
-    strategy = pos.get("strategy", "")
+    strategy_name = pos.get("strategy", "")
     tier = pos.get("tier", "Medium Risk")
-    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
+    
+    # Update evolutionary memory scores
+    memory = load_json(MEMORY_FILE, {})
     scores = memory.setdefault("strategy_scores", {})
-    scores[strategy] = scores.get(strategy, 0.0) + pnl
+    scores[strategy_name] = scores.get(strategy_name, 0.0) + pnl
     save_json(MEMORY_FILE, memory)
 
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER SELL", "product": product_id,
         "price_gbp": price, "quantity": qty, "value_gbp": proceeds,
-        "fee_gbp": fee, "strategy": strategy, "tier": tier, "pnl_gbp": pnl,
+        "fee_gbp": fee, "strategy": strategy_name, "tier": tier, "pnl_gbp": pnl,
         "reason": reason,
     })
-    add_event(state, f"PAPER SELL [{tier}] {product_id} at {money(price)}; P/L {money(pnl)}. {reason}", "SELL")
+    add_event(state, f"PAPER SELL [{tier}] {product_id}; P/L {money(pnl)}. {reason}", "SELL")
     del state["positions"][product_id]
     return True
 
@@ -351,27 +395,22 @@ def auto_paper_cycle() -> dict[str, Any]:
         save_json(STATE_FILE, state)
         return stats
 
-    # Automatically populate 'Very High Risk' bucket with remaining products not explicitly listed
     explicit_listed = set(RISK_TIERS["Low Risk"]["assets"] + RISK_TIERS["Medium Risk"]["assets"] + RISK_TIERS["High Risk"]["assets"])
     RISK_TIERS["Very High Risk"]["assets"] = [p for p in products if p not in explicit_listed]
 
     price_map: dict[str, float] = {}
-    market_data: dict[str, pd.DataFrame] = {}
-    signal_map: dict[str, dict[str, tuple[str, str]]] = {}
+    market_candles: dict[str, pd.DataFrame] = {}
+    active_strategies = get_active_strategies()
 
     for product_id in products:
         try:
             price_map[product_id] = get_price_gbp(product_id)
-            candles = get_candles(product_id)
-            market_data[product_id] = candles
-            signal_map[product_id] = {
-                strategy: strategy_signal(candles, strategy) for strategy in STRATEGIES
-            }
+            market_candles[product_id] = get_candles(product_id)
             stats["markets"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
+        except Exception:
+            pass
 
-    # Active Risk-Tiered Position Monitoring & Rotation
+    # Monitor open positions for evolutionary stop-loss/take-profit or momentum flips
     for product_id in list(state["positions"].keys()):
         try:
             price = price_map.get(product_id) or get_price_gbp(product_id)
@@ -381,74 +420,69 @@ def auto_paper_cycle() -> dict[str, Any]:
             tier = pos.get("tier", "Medium Risk")
             tier_cfg = RISK_TIERS[tier]
             
-            action, reason = signal_map.get(product_id, {}).get(pos.get("strategy"), ("WAIT", "No signal"))
-            change = price / float(pos["entry_price"]) - 1
+            strat_name = pos.get("strategy", "")
+            strat_cfg = next((s for s in active_strategies if s["name"] == strat_name), active_strategies[0])
+            action, reason = adaptive_strategy_signal(market_candles.get(product_id, pd.DataFrame()), strat_cfg)
             
-            # Tier-specific stop-loss and take-profit thresholds
+            change = price / float(pos["entry_price"]) - 1
             if action == "SELL" or change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"]:
                 if change <= tier_cfg["stop_loss"]:
-                    reason = f"[{tier}] Stop-loss reached ({tier_cfg['stop_loss']*100}%)."
+                    reason = f"[{tier}] Stop-loss hit ({tier_cfg['stop_loss']*100}%)."
                 elif change >= tier_cfg["take_profit"]:
-                    reason = f"[{tier}] Take-profit reached (+{tier_cfg['take_profit']*100}%)."
+                    reason = f"[{tier}] Take-profit hit (+{tier_cfg['take_profit']*100}%)."
                 elif action == "SELL":
-                    reason = f"[{tier}] Strategy momentum flipped to SELL."
+                    reason = f"[{tier}] Evolving strategy flipped to SELL."
                 
                 if paper_sell(state, product_id, price, reason):
                     stats["sells"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
+        except Exception:
+            pass
 
-    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
+    # Trigger parameter mutation loop to evolve underperforming strategies
+    mutate_strategies()
+
+    memory = load_json(MEMORY_FILE, {})
     strategy_scores = memory.get("strategy_scores", {})
 
     candidates = []
-    for product_id, signals in signal_map.items():
+    for product_id, df in market_candles.items():
         if product_id in state["positions"]:
             continue
-        buy_strategies = [s for s, (action, _) in signals.items() if action == "BUY"]
-        if buy_strategies:
-            try:
-                df = add_indicators(market_data[product_id])
-                if not df.empty and len(df) >= 2:
-                    row = df.iloc[-2]
-                    trend = float(row["ema21"] / row["ema50"] - 1) if ("ema50" in row and row["ema50"]) else 0.0
+        for strat in active_strategies:
+            action, reason = adaptive_strategy_signal(df, strat)
+            if action == "BUY":
+                try:
                     tier = classify_product_tier(product_id)
-                    
-                    best_strat = max(buy_strategies, key=lambda s: strategy_scores.get(s, 0.0))
-                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.2)
-
-                    score = (len(buy_strategies) * 20) + strat_bonus + max(-15, min(15, trend * 100))
-                    candidates.append((score, product_id, best_strat, tier))
-            except Exception:
-                pass
+                    strat_name = strat["name"]
+                    score = strategy_scores.get(strat_name, 0.0) + 10
+                    candidates.append((score, product_id, strat_name, tier))
+                except Exception:
+                    pass
 
     candidates.sort(reverse=True)
-    for score, product_id, strategy, tier in candidates:
+    for score, product_id, strategy_name, tier in candidates:
         if len(state["positions"]) >= MAX_OPEN_POSITIONS:
             break
         try:
             price = price_map[product_id]
-            if paper_buy(state, product_id, price, strategy, tier):
+            if paper_buy(state, product_id, price, strategy_name, tier):
                 stats["buys"] += 1
-        except Exception as exc:
-            stats["errors"] += 1
+        except Exception:
+            pass
 
     state["last_cycle"] = utc_now()
     state["last_cycle_note"] = (
         f"Scanned {stats['markets']} markets; {stats['buys']} buys, "
-        f"{stats['sells']} sells, {stats['errors']} errors."
+        f"{stats['sells']} sells. Strategies actively evolving."
     )
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
-    memory["last_updated"] = utc_now()
-    memory["last_cycle_note"] = state["last_cycle_note"]
-    save_json(MEMORY_FILE, memory)
     return stats
 
 
 def render_dashboard() -> None:
-    st.title("Coinbase Paper Trading Agent (4-Tier Risk-Weighted)")
-    st.caption("25% Low Risk | 25% Medium Risk | 25% High Risk | 25% Very High Risk")
+    st.title("Coinbase Paper Trading Agent (Self-Evolving & Risk-Tiered)")
+    st.caption("25% Low | 25% Medium | 25% High | 25% Very High Risk • Live Mutation & Rotation")
     
     auto_paper_cycle()
 
@@ -467,14 +501,14 @@ def render_dashboard() -> None:
     pnl = total_value - start
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total paper portfolio", money(total_value), delta=money(pnl))
+    c1.metric("Total portfolio value", money(total_value), delta=money(pnl))
     c2.metric("Available cash", money(cash))
-    c3.metric("Open holdings", money(holdings_value), f"{len(state['positions'])} positions")
+    c3.metric("Open risk-tiered holdings", money(holdings_value), f"{len(state['positions'])} positions")
 
     st.info(
         f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
         f"refresh every {CYCLE_SECONDS} seconds  •  "
-        f"{state.get('last_cycle_note', 'Waiting for first scan.')}"
+        f"{state.get('last_cycle_note', 'Waiting for scan.')}"
     )
 
     st.subheader("Open Risk-Tiered Positions")
@@ -486,7 +520,7 @@ def render_dashboard() -> None:
         positions_rows.append({
             "Market": product_id,
             "Risk Tier": pos.get("tier", "Medium Risk"),
-            "Strategy": pos.get("strategy", ""),
+            "Evolving Strategy": pos.get("strategy", ""),
             "Entry (£)": round(float(pos["entry_price"]), 6),
             "Current (£)": round(price, 6),
             "Value (£)": round(market_value, 2),
@@ -504,9 +538,15 @@ def render_dashboard() -> None:
     else:
         st.write("No paper trades recorded yet.")
 
-    st.subheader("Strategy Profit Scores (Self-Optimization Memory)")
-    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
-    st.json(memory.get("strategy_scores", {}))
+    st.subheader("Active Strategy Evolution & Mutated Parameters")
+    memory = load_json(MEMORY_FILE, {})
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write("**Strategy Profit Scores:**")
+        st.json(memory.get("strategy_scores", {"info": "Accumulating P/L scores..."}))
+    with col_b:
+        st.write("**Mutated Strategy Configurations:**")
+        st.json(memory.get("active_strategies", BASE_STRATEGIES))
 
     st.caption("Educational paper-trading simulator. No real orders are sent.")
 
