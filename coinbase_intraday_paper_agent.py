@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn fee protection, genetic strategy evolution, and native Pandas styling.
+anti-churn fee protection, genetic strategy evolution, and expanded market scanning.
 """
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Native Pandas styled dashboard initialized."
+        st.session_state.last_cycle_note = "Expanded market scan engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
@@ -391,7 +391,15 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = st.session_state.strategies
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 5))
+    # SCAN ALL CURATED RISK-TIER ASSETS + A LARGE BATCH (20) OF PUBLIC TOKENS
+    curated_assets = []
+    for cfg in RISK_TIERS.values():
+        curated_assets.extend(cfg["assets"])
+    
+    other_tokens = [t for t in tokens if t not in curated_assets]
+    sampled_other = random.sample(other_tokens, min(len(other_tokens), 20))
+    scan_tokens = list(set(curated_assets + sampled_other))
+
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -473,7 +481,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Native Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Full Scan: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -482,7 +490,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Native Streamlit Styling • Upgraded TA Indicators • ATR Trailing Stops")
+    st.caption("Full Market Scan • Native Styling • Upgraded TA Indicators • ATR Trailing Stops")
     
     col1, col2 = st.columns([3, 1])
     with col2:
