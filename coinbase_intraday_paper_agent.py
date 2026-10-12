@@ -301,10 +301,18 @@ def paper_sell(state: dict[str, Any], product_id: str, price: float, reason: str
     pnl = proceeds - float(pos["cost_gbp"])
     state["cash_gbp"] = float(state["cash_gbp"]) + proceeds
     state["total_fees_gbp"] = float(state.get("total_fees_gbp", 0.0)) + fee
+    
+    # Self-optimizing score adjustment based on realized profit
+    strategy = pos.get("strategy", "")
+    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
+    scores = memory.setdefault("strategy_scores", {})
+    scores[strategy] = scores.get(strategy, 0.0) + pnl
+    save_json(MEMORY_FILE, memory)
+
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER SELL", "product": product_id,
         "price_gbp": price, "quantity": qty, "value_gbp": proceeds,
-        "fee_gbp": fee, "strategy": pos.get("strategy", ""), "pnl_gbp": pnl,
+        "fee_gbp": fee, "strategy": strategy, "pnl_gbp": pnl,
         "reason": reason,
     })
     add_event(state, f"PAPER SELL {product_id} at {money(price)}; realised P/L {money(pnl)}. {reason}", "SELL")
@@ -360,6 +368,10 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             stats["errors"] += 1
             add_event(state, f"{product_id}: sell/mark error: {exc}", "ERROR")
 
+    # Load strategy success scores to incentivize high-performing strategies
+    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
+    strategy_scores = memory.get("strategy_scores", {})
+
     candidates = []
     for product_id, signals in signal_map.items():
         if product_id in state["positions"]:
@@ -371,8 +383,13 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
                 if not df.empty and len(df) >= 2:
                     row = df.iloc[-2]
                     trend = float(row["ema21"] / row["ema50"] - 1) if ("ema50" in row and row["ema50"]) else 0.0
-                    score = len(buy_strategies) * 10 + max(-5, min(5, trend * 100))
-                    candidates.append((score, product_id, buy_strategies[0]))
+                    
+                    # Score incentivization: boost candidates whose strategy has accumulated higher profit scores
+                    best_strat = max(buy_strategies, key=lambda s: strategy_scores.get(s, 0.0))
+                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.1)
+
+                    score = (len(buy_strategies) * 10) + strat_bonus + max(-5, min(5, trend * 100))
+                    candidates.append((score, product_id, best_strat))
             except Exception:
                 pass
 
@@ -395,11 +412,9 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
     )
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
-    save_json(MEMORY_FILE, {
-        "last_updated": utc_now(),
-        "strategies": STRATEGIES,
-        "last_cycle_note": state["last_cycle_note"],
-    })
+    memory["last_updated"] = utc_now()
+    memory["last_cycle_note"] = state["last_cycle_note"]
+    save_json(MEMORY_FILE, memory)
     return stats
 
 
@@ -407,17 +422,6 @@ def render_dashboard() -> None:
     st.title("Coinbase Intraday Paper-Trading Agent")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
     state = load_state()
-
-    with st.sidebar:
-        st.subheader("Automatic paper trading")
-        st.write("Automation runs while this page is open.")
-        market_limit = st.slider("Markets scanned per cycle", 5, 50, DEFAULT_MARKET_LIMIT, 5, key="market_limit_internal")
-        st.caption(f"Cycle interval: {CYCLE_SECONDS} seconds")
-        if st.button("Reset paper account to £100", type="secondary", use_container_width=True):
-            state = default_state()
-            add_event(state, "Paper account reset to £100.", "RESET")
-            save_json(STATE_FILE, state)
-            st.rerun()
 
     prices: dict[str, float] = {}
     price_errors = []
@@ -431,13 +435,12 @@ def render_dashboard() -> None:
     cash = float(state.get("cash_gbp", 0.0))
     start = float(state.get("starting_cash_gbp", STARTING_CASH_GBP))
     pnl = total_value - start
-    score = round(pnl)
 
-    c1, c2, c3, c4 = st.columns(4)
+    # 3-column metric layout (Score removed)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Total paper portfolio", money(total_value), delta=money(pnl))
     c2.metric("Available cash", money(cash))
     c3.metric("Open holdings", money(holdings_value), f"{len(state['positions'])} positions")
-    c4.metric("Score", f"{score:+d} points", "1 point per £1 P/L")
 
     st.info(
         f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
@@ -481,11 +484,14 @@ def render_dashboard() -> None:
     else:
         st.write("No activity yet. The first automatic cycle should run shortly.")
 
-    st.subheader("Strategy monitor")
+    st.subheader("Strategy monitor & self-optimization scores")
+    memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
+    strategy_scores = memory.get("strategy_scores", {})
+    
     monitor_rows = []
     try:
-        products = get_gbp_products()[:market_limit]
-        for product_id in products[:min(market_limit, 15)]:
+        products = get_gbp_products()[:DEFAULT_MARKET_LIMIT]
+        for product_id in products[:min(DEFAULT_MARKET_LIMIT, 15)]:
             try:
                 df = get_candles(product_id)
                 sigs = {s: strategy_signal(df, s) for s in STRATEGIES}
@@ -502,6 +508,9 @@ def render_dashboard() -> None:
                 monitor_rows.append({"Market": product_id, "Error": str(exc)})
         if monitor_rows:
             st.dataframe(pd.DataFrame(monitor_rows), use_container_width=True, hide_index=True)
+            
+        st.write("**Strategy Profit Scores (Self-Optimization Memory):**")
+        st.json(strategy_scores if strategy_scores else {"info": "No realized P/L scores recorded yet. The agent will self-optimize as trades close profitably."})
     except Exception as exc:
         st.error(f"Could not load market list: {exc}")
 
