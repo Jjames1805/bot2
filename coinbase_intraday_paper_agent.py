@@ -1,8 +1,8 @@
 """
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
-Paper trading only. Multi-tier risk allocation with full, unconstrained
-Coinbase spot market discovery and pristine bankroll accounting.
+Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
+1.75x volume filters, intelligent position rotation, and clean accounting.
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ import streamlit as st
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
-CYCLE_SECONDS = 15
-CANDLE_GRANULARITY = 300
+CYCLE_SECONDS = 30  # Slower cycle for higher timeframe checks
+CANDLE_GRANULARITY = 14400  # 4-Hour candles (4 * 3600 seconds)
 REQUEST_TIMEOUT = 3
 
 RISK_TIERS = {
@@ -29,43 +29,43 @@ RISK_TIERS = {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "capital_fraction": 0.20,
         "max_positions": 3,
-        "stop_loss": -0.03,
-        "take_profit": 0.05,
-        "trailing_distance": 0.015,
+        "stop_loss": -0.04,
+        "take_profit": 0.08,
+        "trailing_distance": 0.02,
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
         "capital_fraction": 0.30,
         "max_positions": 4,
-        "stop_loss": -0.05,
-        "take_profit": 0.08,
-        "trailing_distance": 0.02,
+        "stop_loss": -0.06,
+        "take_profit": 0.12,
+        "trailing_distance": 0.03,
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
         "capital_fraction": 0.30,
         "max_positions": 4,
-        "stop_loss": -0.08,
-        "take_profit": 0.12,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.09,
+        "take_profit": 0.18,
+        "trailing_distance": 0.04,
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
         "capital_fraction": 0.20,
         "max_positions": 3,
-        "stop_loss": -0.12,
-        "take_profit": 0.20,
-        "trailing_distance": 0.04,
+        "stop_loss": -0.15,
+        "take_profit": 0.30,
+        "trailing_distance": 0.06,
     },
 }
 
 BASE_STRATEGIES = [
-    {"name": "Strong Momentum", "fast": 5, "slow": 15},
-    {"name": "Trend Breakout", "vol_mult": 1.2},
+    {"name": "4H Macro Momentum", "fast": 8, "slow": 21},
+    {"name": "4H Volume Expansion", "vol_mult": 1.75},
 ]
 
 st.set_page_config(
-    page_title="Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)",
+    page_title="Coinbase Paper Trading Agent (4H / 1.75x Volume Mode)",
     layout="wide",
 )
 
@@ -90,7 +90,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Multi-tier risk engine initialized."
+        st.session_state.last_cycle_note = "4H High-Conviction engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
 
@@ -104,14 +104,13 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     response = requests.get(
         BASE_URL + path,
         params=params,
-        headers={"User-Agent": "CoinbaseRiskAgent/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "CoinbaseRiskAgent/4H", "Accept": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
 
 def get_all_supported_tokens() -> list[str]:
-    """Dynamically fetches every active USD spot trading pair directly from Coinbase."""
     discovered = []
     for cfg in RISK_TIERS.values():
         discovered.extend(cfg["assets"])
@@ -121,7 +120,6 @@ def get_all_supported_tokens() -> list[str]:
             for item in products:
                 pid = item.get("id", "")
                 status = item.get("status", "")
-                # Ensure it's an active USD pair and online
                 if pid.endswith("-USD") and status == "online" and pid not in discovered:
                     discovered.append(pid)
     except Exception:
@@ -132,7 +130,6 @@ def classify_token_tier(token_id: str) -> str:
     for tier_name, config in RISK_TIERS.items():
         if token_id in config["assets"]:
             return tier_name
-    # Automatically categorize any newly discovered Coinbase token across tiers
     tiers = list(RISK_TIERS.keys())
     idx = abs(hash(token_id)) % len(tiers)
     return tiers[idx]
@@ -159,37 +156,37 @@ def get_candles(token_id: str) -> pd.DataFrame:
             for col in ["low", "high", "open", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            return df.tail(300).reset_index(drop=True)
+            return df.tail(100).reset_index(drop=True)
     except Exception:
         pass
     
     current_p = get_price_usd(token_id)
-    times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="5min")
-    prices = [current_p * (1 + random.uniform(-0.015, 0.015)) for _ in range(30)]
-    volumes = [random.uniform(100, 5000) for _ in range(30)]
+    times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="4h")
+    prices = [current_p * (1 + random.uniform(-0.02, 0.02)) for _ in range(30)]
+    volumes = [random.uniform(500, 10000) for _ in range(30)]
     return pd.DataFrame({
         "time": times,
-        "low": [p * 0.99 for p in prices],
-        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.98 for p in prices],
+        "high": [p * 1.02 for p in prices],
         "open": prices,
         "close": prices,
         "volume": volumes
     })
 
-def add_indicators(df: pd.DataFrame, fast: int = 5, slow: int = 15) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame, fast: int = 8, slow: int = 21) -> pd.DataFrame:
     if df.empty or len(df) < slow:
         return df
     out = df.copy()
     close = out["close"]
     out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
     out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
-    out["vol_avg"] = out["volume"].rolling(10).mean().fillna(1.0)
+    out["vol_avg"] = out["volume"].rolling(14).mean().fillna(1.0)
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str, float]:
-    data = add_indicators(df)
-    if len(data) < 5:
-        return "WAIT", "Insufficient data.", 0.0
+    data = add_indicators(df, fast=strategy_config.get("fast", 8), slow=strategy_config.get("slow", 21))
+    if len(data) < 10:
+        return "WAIT", "Insufficient 4H data.", 0.0
     row = data.iloc[-1]
     
     ema_fast = float(row["ema_fast"])
@@ -197,11 +194,13 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     vol = float(row["volume"])
     vol_avg = float(row["vol_avg"])
     
-    if ema_fast > ema_slow and vol >= vol_avg * 1.02:
+    # Strict 1.75x Volume expansion filter + EMA crossover on 4H candles
+    required_vol_mult = strategy_config.get("vol_mult", 1.75)
+    if ema_fast > ema_slow and vol >= (vol_avg * required_vol_mult):
         strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
-        return "BUY", "Confirmed momentum breakout.", strength
+        return "BUY", "Confirmed 4H volume breakout (>=1.75x avg).", strength
     
-    return "WAIT", "Waiting for high-conviction setup.", 0.0
+    return "WAIT", "Waiting for 4H volume expansion.", 0.0
 
 def get_total_cost_basis() -> float:
     return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
@@ -263,7 +262,7 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
         "price_usd": clean_price, "quantity": float(quantity), "value_usd": float(spend),
         "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
-    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)} (Allocation: {money(spend)}).", "BUY")
+    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)} (4H Breakout).", "BUY")
     return True
 
 def paper_sell(token_id: str, price: float, reason: str) -> bool:
@@ -298,8 +297,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    # Scan a broad sample of active Coinbase markets each cycle
-    scan_tokens = random.sample(tokens, min(len(tokens), 25))
+    scan_tokens = random.sample(tokens, min(len(tokens), 20))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -323,13 +321,13 @@ def auto_paper_cycle() -> dict[str, Any]:
         trailing_stop = peak * (1.0 - tier_cfg["trailing_distance"])
         
         if change <= tier_cfg["stop_loss"]:
-            if paper_sell(token_id, price, "Stop-loss triggered."):
+            if paper_sell(token_id, price, "4H Stop-loss triggered."):
                 stats["sells"] += 1
         elif change >= tier_cfg["take_profit"]:
-            if paper_sell(token_id, price, "Take-profit target reached."):
+            if paper_sell(token_id, price, "4H Take-profit target reached."):
                 stats["sells"] += 1
         elif price <= trailing_stop and peak > entry_p:
-            if paper_sell(token_id, price, "Trailing profit secured."):
+            if paper_sell(token_id, price, "4H Trailing profit secured."):
                 stats["sells"] += 1
 
     candidates = []
@@ -360,8 +358,8 @@ def auto_paper_cycle() -> dict[str, Any]:
                 worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
-                if worst_change < 0.01:
-                    if paper_sell(worst_tid, worst_curr, f"Rotating out for higher conviction signal ({token_id})."):
+                if worst_change < 0.02:
+                    if paper_sell(worst_tid, worst_curr, f"Rotating out for stronger 4H setup ({token_id})."):
                         stats["sells"] += 1
                         stats["rotations"] += 1
 
@@ -369,7 +367,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Active cycle: {stats['markets']} markets scanned, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"4H Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -377,8 +375,8 @@ def auto_paper_cycle() -> dict[str, Any]:
 def render_live_dashboard() -> None:
     init_session_state()
     
-    st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Full Coinbase Market Discovery")
+    st.title("Coinbase Paper Trading Agent (4H / 1.75x Volume Mode)")
+    st.caption("Active Paper Trading Simulator • High-Conviction 4-Hour Timeframe Engine")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -475,7 +473,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Scanning all Coinbase markets for high-conviction breakout opportunities...")
+        st.write("Waiting for 4H volume expansion (>=1.75x avg) across Coinbase markets...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
