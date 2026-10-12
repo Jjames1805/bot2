@@ -1,8 +1,8 @@
 """
-Coinbase intraday paper-trading agent (High-Risk Mode)
-------------------------------------------------------
+Coinbase intraday paper-trading agent (High-Risk Auto-Refreshing Mode)
+--------------------------------------------------------------------
 Paper trading only. This app uses public Coinbase Exchange market data and never
-submits real orders. It scans markets and simulates buys/sells while the app is open.
+submits real orders. It scans markets and simulates buys/sells automatically.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ CANDLE_GRANULARITY = 300  # 5-minute candles
 CANDLE_CACHE_SECONDS = 30
 MAX_OPEN_POSITIONS = 20
 MIN_POSITION_GBP = 2.0
-MAX_POSITION_FRACTION = 0.75  # Increased risk: up to 75% of available cash per trade
-DEFAULT_MARKET_LIMIT = 40     # Increased market breadth
+MAX_POSITION_FRACTION = 0.75  # High risk: up to 75% of available cash per trade
+DEFAULT_MARKET_LIMIT = 40
 REQUEST_TIMEOUT = 12
 
 STRATEGIES = [
@@ -194,7 +194,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def strategy_signal(df: pd.DataFrame, strategy: str) -> tuple[str, str]:
-    if len(df) < 30:  # Lowered threshold for faster high-risk entries
+    if len(df) < 30:
         return "WAIT", f"Need at least 30 candles; received {len(df)}."
     data = add_indicators(df)
     row = data.iloc[-2]
@@ -297,7 +297,6 @@ def paper_sell(state: dict[str, Any], product_id: str, price: float, reason: str
     state["cash_gbp"] = float(state["cash_gbp"]) + proceeds
     state["total_fees_gbp"] = float(state.get("total_fees_gbp", 0.0)) + fee
     
-    # Self-optimizing score adjustment based on realized profit
     strategy = pos.get("strategy", "")
     memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
     scores = memory.setdefault("strategy_scores", {})
@@ -353,7 +352,6 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             action, reason = signal_map.get(product_id, {}).get(pos.get("strategy"), ("WAIT", "No signal"))
             change = price / float(pos["entry_price"]) - 1
             
-            # Wider risk parameters: -12% stop loss, +25% take profit
             if action == "SELL" or change <= -0.12 or change >= 0.25:
                 if change <= -0.12:
                     reason = "Paper stop-loss reached (-12%)."
@@ -413,9 +411,27 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
     return stats
 
 
+@st.fragment(run_every=CYCLE_SECONDS)
+def continuous_trading_panel() -> None:
+    auto_paper_cycle(DEFAULT_MARKET_LIMIT)
+    state = load_state()
+    prices = {}
+    for product_id in state["positions"]:
+        try:
+            prices[product_id] = get_price_gbp(product_id)
+        except Exception:
+            pass
+    total_value, _ = portfolio_value(state, prices)
+    st.toast(f"Automated scan completed at {utc_now()} | Portfolio: {money(total_value)}")
+
+
 def render_dashboard() -> None:
-    st.title("Coinbase Intraday Paper-Trading Agent (High-Risk Mode)")
+    st.title("Coinbase Paper Trading Agent (High-Risk Mode)")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
+    
+    # Run the background trading cycle loop every 30 seconds automatically
+    continuous_trading_panel()
+
     state = load_state()
 
     prices: dict[str, float] = {}
@@ -515,11 +531,6 @@ def render_dashboard() -> None:
 
 
 def main() -> None:
-    if "market_limit_internal" not in st.session_state:
-        st.session_state["market_limit_internal"] = DEFAULT_MARKET_LIMIT
-
-    market_limit = st.session_state.get("market_limit_internal", DEFAULT_MARKET_LIMIT)
-    auto_paper_cycle(int(market_limit))
     render_dashboard()
 
 
