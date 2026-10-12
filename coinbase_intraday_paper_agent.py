@@ -1,5 +1,5 @@
 """
-Coinbase intraday paper-trading agent (High-Risk Auto-Refreshing Mode)
+Coinbase intraday paper-trading agent (Robust Auto-Refreshing Mode)
 --------------------------------------------------------------------
 Paper trading only. This app uses public Coinbase Exchange market data and never
 submits real orders. It scans markets and simulates buys/sells automatically.
@@ -409,25 +409,12 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
     return stats
 
 
-@st.fragment(run_every=CYCLE_SECONDS)
-def continuous_trading_panel() -> None:
-    auto_paper_cycle(DEFAULT_MARKET_LIMIT)
-    state = load_state()
-    prices = {}
-    for product_id in state["positions"]:
-        try:
-            prices[product_id] = get_price_gbp(product_id)
-        except Exception:
-            pass
-    total_value, _ = portfolio_value(state, prices)
-    st.toast(f"Automated scan completed at {utc_now()} | Portfolio: {money(total_value)}")
-
-
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (High-Risk Mode)")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
     
-    continuous_trading_panel()
+    # Run trading cycle on load
+    auto_paper_cycle(DEFAULT_MARKET_LIMIT)
 
     state = load_state()
 
@@ -529,6 +516,10 @@ def render_dashboard() -> None:
 
 def main() -> None:
     render_dashboard()
+    
+    # Sleep and rerun for robust automatic cloud refreshing
+    time.sleep(CYCLE_SECONDS)
+    st.rerun()
 
 
 if __name__ == "__main__":
