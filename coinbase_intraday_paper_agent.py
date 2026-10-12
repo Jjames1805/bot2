@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Native 30-Second Auto-Refresh Fragment)
----------------------------------------------------------------------
-Scans all Coinbase USD spot pairs, executing background updates precisely 
-every 30 seconds using native Streamlit fragments.
+Coinbase Paper Trading Agent (Accurate Live Pricing & Full Market Coverage)
+--------------------------------------------------------------------------
+Scans all Coinbase USD spot pairs automatically every 30 seconds, 
+with accurate live token pricing and native Streamlit auto-refreshing.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Automated engine initialized."
+        st.session_state.last_cycle_note = "Accurate live-pricing engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -155,8 +155,23 @@ def fetch_global_prices() -> dict[str, float]:
         pass
     return prices
 
+def get_token_spot_price(token_id: str) -> float:
+    """Fetches real-time price directly for a specific token if missing from cache."""
+    if token_id in st.session_state.price_cache and st.session_state.price_cache[token_id] > 0:
+        return st.session_state.price_cache[token_id]
+    try:
+        res = requests.get(f"{BASE_URL}/products/{token_id}/ticker", timeout=REQUEST_TIMEOUT)
+        if res.status_code == 200:
+            p = float(res.json().get("price", 0.0) or 0.0)
+            if p > 0:
+                st.session_state.price_cache[token_id] = p
+                return p
+    except Exception:
+        pass
+    return 0.0
+
 def generate_fallback_candles(current_price: float) -> pd.DataFrame:
-    p = current_price if current_price > 0 else 100.0
+    p = current_price if current_price > 0 else 1.0
     times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="4h")
     prices = [p * (1 + random.uniform(-0.015, 0.025)) for _ in range(30)]
     volumes = [random.uniform(1000, 50000) for _ in range(30)]
@@ -403,7 +418,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     
     candles_map = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(fetch_candles_single, t, price_map.get(t, 100.0)): t for t in scan_candle_targets}
+        futures = {executor.submit(fetch_candles_single, t, price_map.get(t, get_token_spot_price(t))): t for t in scan_candle_targets}
         for future in concurrent.futures.as_completed(futures):
             try:
                 tid, df = future.result()
@@ -414,7 +429,9 @@ def auto_paper_cycle() -> dict[str, Any]:
 
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
-        price = price_map.get(token_id, pos.get("last_price", pos["entry_price"]))
+        price = price_map.get(token_id, get_token_spot_price(token_id))
+        if price <= 0:
+            price = pos.get("last_price", pos["entry_price"])
         pos["last_price"] = price
         
         tier = classify_token_tier(token_id)
@@ -469,9 +486,9 @@ def auto_paper_cycle() -> dict[str, Any]:
             if tier_positions:
                 worst_tid, worst_pos = min(
                     tier_positions,
-                    key=lambda x: (price_map.get(x[0], x[1]["last_price"]) / x[1]["entry_price"]) - 1
+                    key=lambda x: (price_map.get(x[0], get_token_spot_price(x[0])) / x[1]["entry_price"]) - 1
                 )
-                worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
+                worst_curr = price_map.get(worst_tid, get_token_spot_price(worst_tid))
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
                 if worst_change < -0.01:
@@ -481,12 +498,12 @@ def auto_paper_cycle() -> dict[str, Any]:
 
         df_cand = candles_map.get(token_id, pd.DataFrame())
         atr_calc = float(df_cand["close"].iloc[-1] * 0.02) if not df_cand.empty else 0.0
-        p_buy = price_map.get(token_id, 100.0)
+        p_buy = price_map.get(token_id, get_token_spot_price(token_id))
         if p_buy > 0 and paper_buy(token_id, p_buy, strat_name, tier, atr_val=atr_calc):
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Active batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
+    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -495,7 +512,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Active Execution")
+    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Real-Time Token Pricing")
 
     col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
@@ -509,7 +526,8 @@ def render_live_dashboard() -> None:
 
     prices = {}
     for tid, pos in st.session_state.positions.items():
-        prices[tid] = pos.get("last_price", pos["entry_price"])
+        p = price_map = st.session_state.price_cache.get(tid, get_token_spot_price(tid))
+        prices[tid] = p if p > 0 else pos.get("entry_price", 1.0)
         
     holdings_val = 0.0
     unrealized_pnl = 0.0
