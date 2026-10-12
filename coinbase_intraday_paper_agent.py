@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Full Live Pricing & Auto-Refresh)
----------------------------------------------------------------
+Coinbase Paper Trading Agent (Updated Capital Allocations & Live Pricing)
+-------------------------------------------------------------------------
 Scans all Coinbase USD spot pairs automatically every 30 seconds, 
-utilizing parallel ticker lookups to guarantee live asset valuation updates.
+with updated risk tier weightings, parallel ticker pricing, and auto-refresh.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ CANDLE_BATCH_SIZE = 35
 RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "capital_fraction": 0.20,
+        "capital_fraction": 0.15,
         "max_positions": 3,
         "stop_loss": -0.05,
         "take_profit": 0.10,
@@ -36,7 +36,7 @@ RISK_TIERS = {
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "capital_fraction": 0.30,
+        "capital_fraction": 0.40,
         "max_positions": 4,
         "stop_loss": -0.08,
         "take_profit": 0.15,
@@ -52,7 +52,7 @@ RISK_TIERS = {
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "capital_fraction": 0.20,
+        "capital_fraction": 0.15,
         "max_positions": 3,
         "stop_loss": -0.18,
         "take_profit": 0.40,
@@ -86,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Live pricing engine initialized."
+        st.session_state.last_cycle_note = "Updated risk allocations initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -141,7 +141,6 @@ def fetch_all_coinbase_pairs() -> list[str]:
     return sorted(list(set(defaults)))
 
 def fetch_live_prices_for_tokens(tokens: list[str]) -> dict[str, float]:
-    """Fetches real-time ticker prices for a given list of tokens in parallel."""
     prices = {}
     def fetch_one(tid):
         try:
@@ -411,7 +410,6 @@ def auto_paper_cycle() -> dict[str, Any]:
     else:
         batch = []
 
-    # Combine held positions and current batch for live pricing and candle scans
     active_targets = list(set(held_tokens + batch))
     
     live_prices = fetch_live_prices_for_tokens(active_targets)
@@ -514,7 +512,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Live Parallel Pricing")
+    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Updated Risk Weightings")
 
     col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
