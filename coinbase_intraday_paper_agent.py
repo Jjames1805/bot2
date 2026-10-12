@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-fixed $10 position sizing and transparent portfolio accounting.
+fixed $10 position sizing and transparent, verified portfolio accounting.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 9,
+        "state_version": 10,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -107,7 +107,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 9:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 10:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -234,14 +234,6 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     
     return "BUY", "Active trigger."
 
-def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
-    holdings = 0.0
-    for token_id, pos in state.get("positions", {}).items():
-        price = prices.get(token_id, pos.get("last_price", pos.get("entry_price", 0.0)))
-        holdings += float(pos.get("quantity", 0.0)) * float(price)
-    cash = float(state.get("cash_usd", STARTING_CASH_USD))
-    return cash + holdings, holdings
-
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
     cash = float(state["cash_usd"])
     if cash < POSITION_SIZE_USD:
@@ -361,7 +353,7 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Fixed $10 Sizing • Accurate Portfolio Math")
+    st.caption("Active Paper Trading Simulator • Verified Ledger Accounting")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -380,10 +372,14 @@ def render_dashboard() -> None:
         prices[tid] = get_price_usd(tid, fallback_price=fallback)
         pos["last_price"] = prices[tid]
         
-    total_val, holdings_val = portfolio_value(state, prices)
+    # Strictly computed Holdings Market Value = sum(quantity * current_price)
+    holdings_val = 0.0
+    for tid, pos in state["positions"].items():
+        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
+        holdings_val += float(pos.get("quantity", 0.0)) * curr_p
+
     cash = float(state.get("cash_usd", STARTING_CASH_USD))
-    
-    # Correct accounting baseline: total value compared against starting capital ($100)
+    total_val = cash + holdings_val
     pnl = total_val - STARTING_CASH_USD
 
     c1, c2, c3 = st.columns(3)
@@ -393,7 +389,18 @@ def render_dashboard() -> None:
 
     st.info(f"Last Cycle: {state.get('last_cycle')} UTC — {state.get('last_cycle_note')}")
 
-    st.subheader("Active Positions (Fixed $10 Sizing)")
+    # Transparent Ledger Summary
+    st.subheader("Portfolio Ledger Breakdown")
+    ledger_df = pd.DataFrame([
+        {"Metric": "Starting Capital", "Amount": money(STARTING_CASH_USD)},
+        {"Metric": "Available Cash", "Amount": money(cash)},
+        {"Metric": "Holdings Market Value", "Amount": money(holdings_val)},
+        {"Metric": "Total Portfolio Value (Cash + Holdings)", "Amount": money(total_val)},
+        {"Metric": "Total Net P/L", "Amount": money(pnl)},
+    ])
+    st.dataframe(ledger_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Active Positions")
     rows = []
     for tid, pos in state["positions"].items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
