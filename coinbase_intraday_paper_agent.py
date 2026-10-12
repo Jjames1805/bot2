@@ -2,7 +2,8 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-1.75x volume filters, strict deduplication, and pristine bankroll accounting.
+1.75x volume filters, self-evolving genetic strategy optimization, 
+strict deduplication, and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -59,13 +60,8 @@ RISK_TIERS = {
     },
 }
 
-BASE_STRATEGIES = [
-    {"name": "4H Macro Momentum", "fast": 8, "slow": 21, "vol_mult": 1.5},
-    {"name": "4H Volume Expansion", "fast": 5, "slow": 15, "vol_mult": 1.75},
-]
-
 st.set_page_config(
-    page_title="Coinbase Paper Trading Agent (4H / 1.75x Volume Mode)",
+    page_title="Coinbase Self-Evolving Paper Trading Agent",
     layout="wide",
 )
 
@@ -90,9 +86,16 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "4H High-Conviction engine initialized."
+        st.session_state.last_cycle_note = "Self-evolving genetic engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
+    
+    # Self-Evolving Strategy Pool with tracking metrics
+    if "strategies" not in st.session_state:
+        st.session_state.strategies = [
+            {"name": "Alpha-V1 (Macro Momentum)", "fast": 8, "slow": 21, "vol_mult": 1.5, "pnl": 0.0, "trades_count": 0},
+            {"name": "Alpha-V2 (Volume Breakout)", "fast": 5, "slow": 15, "vol_mult": 1.75, "pnl": 0.0, "trades_count": 0},
+        ]
 
 def add_event(message: str, kind: str = "INFO") -> None:
     st.session_state.events.insert(
@@ -104,7 +107,7 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     response = requests.get(
         BASE_URL + path,
         params=params,
-        headers={"User-Agent": "CoinbaseRiskAgent/4H", "Accept": "application/json"},
+        headers={"User-Agent": "CoinbaseEvolvingAgent/4H", "Accept": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -173,7 +176,7 @@ def get_candles(token_id: str) -> pd.DataFrame:
         "volume": volumes
     })
 
-def add_indicators(df: pd.DataFrame, fast: int = 8, slow: int = 21) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
     if df.empty or len(df) < slow:
         return df
     out = df.copy()
@@ -184,7 +187,9 @@ def add_indicators(df: pd.DataFrame, fast: int = 8, slow: int = 21) -> pd.DataFr
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str, float]:
-    data = add_indicators(df, fast=strategy_config.get("fast", 8), slow=strategy_config.get("slow", 21))
+    fast = int(strategy_config.get("fast", 8))
+    slow = max(fast + 2, int(strategy_config.get("slow", 21)))
+    data = add_indicators(df, fast=fast, slow=slow)
     if len(data) < 10:
         return "WAIT", "Insufficient 4H data.", 0.0
     row = data.iloc[-1]
@@ -194,12 +199,43 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     vol = float(row["volume"])
     vol_avg = float(row["vol_avg"])
     
-    required_vol_mult = strategy_config.get("vol_mult", 1.75)
+    required_vol_mult = float(strategy_config.get("vol_mult", 1.75))
     if ema_fast > ema_slow and vol >= (vol_avg * required_vol_mult):
         strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
-        return "BUY", "Confirmed 4H volume breakout.", strength
+        return "BUY", f"Evolved Breakout ({strategy_config['name']})", strength
     
-    return "WAIT", "Waiting for 4H volume expansion.", 0.0
+    return "WAIT", "Waiting for volume expansion.", 0.0
+
+def evolve_strategies_genetic() -> str:
+    """Genetic algorithm: evaluates active strategies, eliminates underperformers, and mutates top alpha."""
+    pool = st.session_state.strategies
+    if len(pool) < 2:
+        return "Evolution pending more data."
+    
+    # Sort strategies by cumulative performance (PnL)
+    pool.sort(key=lambda x: x["pnl"], reverse=True)
+    best_strat = pool[0]
+    worst_strat = pool[-1]
+    
+    # Mutate parameters from the best performer to create a new evolving variant
+    mutation_id = random.randint(100, 999)
+    new_fast = max(3, int(best_strat["fast"] + random.choice([-2, -1, 1, 2])))
+    new_slow = max(new_fast + 4, int(best_strat["slow"] + random.choice([-3, -1, 2, 4])))
+    new_vol = round(max(1.2, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.15, -0.05, 0.05, 0.15]))), 2)
+    
+    mutated_strat = {
+        "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow}/V:{new_vol})",
+        "fast": new_fast,
+        "slow": new_slow,
+        "vol_mult": new_vol,
+        "pnl": 0.0,
+        "trades_count": 0
+    }
+    
+    # Replace the worst strategy with the newly mutated offspring
+    pool[-1] = mutated_strat
+    add_event(f"🧬 Genetic Evolution: Replaced underperforming strategy with mutated variant {mutated_strat['name']}.", "EVOLVE")
+    return f"Evolved! Spawned {mutated_strat['name']} from elite parent {best_strat['name']}."
 
 def get_total_cost_basis() -> float:
     return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
@@ -263,7 +299,7 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
         "price_usd": clean_price, "quantity": float(quantity), "value_usd": float(spend),
         "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
-    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)} (4H Breakout).", "BUY")
+    add_event(f"PAPER BUY [{tier}] {token_id} via {strategy_name} at {money(clean_price)}.", "BUY")
     return True
 
 def paper_sell(token_id: str, price: float, reason: str) -> bool:
@@ -279,15 +315,27 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
     st.session_state.realized_pnl += pnl
     st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
     
+    strat_name = pos.get("strategy", "")
+    for s in st.session_state.strategies:
+        if s["name"] == strat_name:
+            s["pnl"] += pnl
+            s["trades_count"] += 1
+            break
+
     tier = pos.get("tier", "Medium Risk")
     st.session_state.trades.insert(0, {
         "time": utc_now(), "side": "PAPER SELL", "token": token_id,
         "price_usd": float(price), "quantity": float(qty), "value_usd": float(proceeds),
-        "fee_usd": float(fee), "strategy": pos.get("strategy", ""), "tier": tier, "pnl_usd": float(pnl),
+        "fee_usd": float(fee), "strategy": strat_name, "tier": tier, "pnl_usd": float(pnl),
         "reason": reason,
     })
     add_event(f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
     del st.session_state.positions[token_id]
+    
+    # Trigger genetic evolution check after every closed trade
+    if len(st.session_state.trades) % 2 == 0:
+        evolve_strategies_genetic()
+        
     return True
 
 def auto_paper_cycle() -> dict[str, Any]:
@@ -296,7 +344,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     
     price_map = {}
     market_candles = {}
-    active_strategies = BASE_STRATEGIES
+    active_strategies = st.session_state.strategies
     
     scan_tokens = random.sample(tokens, min(len(tokens), 20))
     for token_id in scan_tokens:
@@ -322,13 +370,13 @@ def auto_paper_cycle() -> dict[str, Any]:
         trailing_stop = peak * (1.0 - tier_cfg["trailing_distance"])
         
         if change <= tier_cfg["stop_loss"]:
-            if paper_sell(token_id, price, "4H Stop-loss triggered."):
+            if paper_sell(token_id, price, "Stop-loss triggered."):
                 stats["sells"] += 1
         elif change >= tier_cfg["take_profit"]:
-            if paper_sell(token_id, price, "4H Take-profit target reached."):
+            if paper_sell(token_id, price, "Take-profit target reached."):
                 stats["sells"] += 1
         elif price <= trailing_stop and peak > entry_p:
-            if paper_sell(token_id, price, "4H Trailing profit secured."):
+            if paper_sell(token_id, price, "Trailing profit secured."):
                 stats["sells"] += 1
 
     candidates_map = {}
@@ -367,7 +415,7 @@ def auto_paper_cycle() -> dict[str, Any]:
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
                 if worst_change < 0.02:
-                    if paper_sell(worst_tid, worst_curr, f"Rotating out for stronger 4H setup ({token_id})."):
+                    if paper_sell(worst_tid, worst_curr, f"Rotating out for evolving alpha ({token_id})."):
                         stats["sells"] += 1
                         stats["rotations"] += 1
 
@@ -375,7 +423,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"4H Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Evolving Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -383,8 +431,8 @@ def auto_paper_cycle() -> dict[str, Any]:
 def render_live_dashboard() -> None:
     init_session_state()
     
-    st.title("Coinbase Paper Trading Agent (4H / 1.75x Volume Mode)")
-    st.caption("Active Paper Trading Simulator • High-Conviction 4-Hour Timeframe Engine")
+    st.title("Coinbase Self-Evolving Paper Trading Agent")
+    st.caption("Autonomous Genetic Strategy Optimization • 4H Timeframe • 1.75x Volume Engine")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -423,32 +471,18 @@ def render_live_dashboard() -> None:
 
     st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
 
-    st.subheader("Portfolio Ledger Breakdown")
-    ledger_df = pd.DataFrame([
-        {"Metric": "Starting Capital", "Amount": money(STARTING_CASH_USD)},
-        {"Metric": "Realized P/L", "Amount": money(st.session_state.realized_pnl)},
-        {"Metric": "Available Cash", "Amount": money(cash)},
-        {"Metric": "Holdings Market Value", "Amount": money(holdings_val)},
-        {"Metric": "Total Portfolio Value", "Amount": money(total_val)},
-        {"Metric": "Total Net P/L", "Amount": money(total_net_pnl)},
-    ])
-    st.dataframe(ledger_df, use_container_width=True, hide_index=True)
-
-    st.subheader("Risk Tier Capital Allocation")
-    tier_rows = []
-    for tier_name, cfg in RISK_TIERS.items():
-        budget = get_tier_allocation(tier_name)
-        invested = get_tier_current_invested(tier_name)
-        pos_count = count_tier_positions(tier_name)
-        tier_rows.append({
-            "Risk Tier": tier_name,
-            "Allocation Target (%)": f"{int(cfg['capital_fraction'] * 100)}%",
-            "Budget ($)": round(budget, 2),
-            "Invested ($)": round(invested, 2),
-            "Open Positions": f"{pos_count} / {cfg['max_positions']}",
-            "Stop Loss / Take Profit": f"{cfg['stop_loss']*100:.1f}% / +{cfg['take_profit']*100:.1f}%"
+    st.subheader("Evolving Strategies Pool (Genetic Pool)")
+    strat_rows = []
+    for s in st.session_state.strategies:
+        strat_rows.append({
+            "Strategy Variant": s["name"],
+            "Fast EMA": s["fast"],
+            "Slow EMA": s["slow"],
+            "Min Volume Mult": s["vol_mult"],
+            "Closed Trades": s["trades_count"],
+            "Attributed P/L ($)": round(s["pnl"], 2)
         })
-    st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(strat_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Active Positions")
     rows = []
@@ -481,7 +515,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Waiting for 4H volume expansion across Coinbase markets...")
+        st.write("Evolving strategies scanning Coinbase markets for breakouts...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
