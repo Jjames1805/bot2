@@ -1,8 +1,8 @@
 """
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
-Paper trading only. Multi-tier risk-weighted capital allocation
-with strict global cash guardrails and pristine bankroll accounting.
+Paper trading only. Multi-tier risk allocation with intelligent
+position rotation, live market scanning, and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -181,16 +181,22 @@ def add_indicators(df: pd.DataFrame, fast: int = 5, slow: int = 15) -> pd.DataFr
     out["vol_avg"] = out["volume"].rolling(10).mean().fillna(1.0)
     return out
 
-def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
+def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str, float]:
     data = add_indicators(df)
     if len(data) < 5:
-        return "WAIT", "Insufficient data."
+        return "WAIT", "Insufficient data.", 0.0
     row = data.iloc[-1]
     
-    if row["ema_fast"] > row["ema_slow"] and row["volume"] >= row["vol_avg"] * 1.02:
-        return "BUY", "Confirmed momentum breakout."
+    ema_fast = float(row["ema_fast"])
+    ema_slow = float(row["ema_slow"])
+    vol = float(row["volume"])
+    vol_avg = float(row["vol_avg"])
     
-    return "WAIT", "Waiting for high-conviction setup."
+    if ema_fast > ema_slow and vol >= vol_avg * 1.02:
+        strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
+        return "BUY", "Confirmed momentum breakout.", strength
+    
+    return "WAIT", "Waiting for high-conviction setup.", 0.0
 
 def get_total_cost_basis() -> float:
     return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
@@ -212,10 +218,7 @@ def count_tier_positions(tier_name: str) -> int:
 
 def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
     tier_cfg = RISK_TIERS[tier]
-    if count_tier_positions(tier) >= tier_cfg["max_positions"]:
-        return False
     
-    # Check global unallocated cash first
     total_cost_basis = get_total_cost_basis()
     global_cash = STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis
     if global_cash < 5.0:
@@ -226,7 +229,6 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
     available_tier_cash = tier_budget - tier_invested
     
     target_pos_size = tier_budget / tier_cfg["max_positions"]
-    # Spend cannot exceed tier availability, target size, or total remaining global cash
     spend = min(available_tier_cash, target_pos_size, global_cash)
     
     if spend < 5.0:
@@ -284,7 +286,7 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
     return True
 
 def auto_paper_cycle() -> dict[str, Any]:
-    stats = {"markets": 0, "buys": 0, "sells": 0}
+    stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
     tokens = get_all_supported_tokens()
     
     price_map = {}
@@ -298,6 +300,7 @@ def auto_paper_cycle() -> dict[str, Any]:
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
+    # 1. Evaluate existing positions for Stop-Loss, Take-Profit, or Trailing Stop
     for token_id in list(st.session_state.positions.keys()):
         pos = st.session_state.positions[token_id]
         fallback = pos.get("entry_price")
@@ -324,23 +327,49 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "Trailing profit secured."):
                 stats["sells"] += 1
 
+    # 2. Scan market candidates for buy opportunities & intelligent rotation
     candidates = []
     for token_id, df in market_candles.items():
         if token_id in st.session_state.positions:
             continue
         for strat in active_strategies:
-            action, _ = adaptive_strategy_signal(df, strat)
+            action, _, strength = adaptive_strategy_signal(df, strat)
             if action == "BUY":
                 tier = classify_token_tier(token_id)
-                candidates.append((token_id, strat["name"], tier))
+                candidates.append((token_id, strat["name"], tier, strength))
 
-    random.shuffle(candidates)
-    for token_id, strat_name, tier in candidates:
+    # Sort candidates by signal strength (strongest breakout first)
+    candidates.sort(key=lambda x: x[3], reverse=True)
+
+    for token_id, strat_name, tier, strength in candidates:
+        tier_cfg = RISK_TIERS[tier]
+        current_tier_count = count_tier_positions(tier)
+        
+        # Opportunity Cost Rotation: If tier is full, check if we should drop the worst-performing position
+        if current_tier_count >= tier_cfg["max_positions"]:
+            tier_positions = [
+                (tid, p) for tid, p in st.session_state.positions.items() if p.get("tier") == tier
+            ]
+            if tier_positions:
+                # Find the worst performing position in this tier
+                worst_tid, worst_pos = min(
+                    tier_positions,
+                    key=lambda x: (price_map.get(x[0], x[1]["last_price"]) / x[1]["entry_price"]) - 1
+                )
+                worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
+                worst_change = (worst_curr / worst_pos["entry_price"]) - 1
+                
+                # If the worst position is stagnant or negative, rotate out for the new stronger candidate
+                if worst_change < 0.01:
+                    if paper_sell(worst_tid, worst_curr, f"Rotating out for higher conviction signal ({token_id})."):
+                        stats["sells"] += 1
+                        stats["rotations"] += 1
+
         if paper_buy(token_id, price_map.get(token_id, get_price_usd(token_id)), strat_name, tier):
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells."
+    st.session_state.last_cycle_note = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -349,7 +378,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Strict Global Cash Guardrails")
+    st.caption("Active Paper Trading Simulator • Intelligent Position Rotation")
     
     col1, col2 = st.columns([3, 1])
     with col2:
