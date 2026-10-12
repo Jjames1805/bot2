@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-volume-weighted entries, trailing stops, and 4-tier risk allocation.
+fixed $10 position sizing for crystal-clear portfolio accounting.
 """
 from __future__ import annotations
 
@@ -27,35 +27,30 @@ STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
 CYCLE_SECONDS = 15
 CANDLE_GRANULARITY = 300
-MAX_OPEN_POSITIONS = 8
-MIN_POSITION_USD = 2.0
+MAX_OPEN_POSITIONS = 9
+POSITION_SIZE_USD = 10.0  # Fixed $10 per position so math always adds up
 REQUEST_TIMEOUT = 3
 
-# Balanced 4-Tier Risk Classification
 RISK_TIERS = {
     "Low Risk": {
-        "allocation_fraction": 0.25,
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "stop_loss": -0.05,
         "take_profit": 0.03,
         "trailing_distance": 0.015,
     },
     "Medium Risk": {
-        "allocation_fraction": 0.25,
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
         "stop_loss": -0.06,
         "take_profit": 0.04,
         "trailing_distance": 0.02,
     },
     "High Risk": {
-        "allocation_fraction": 0.25,
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
         "stop_loss": -0.08,
         "take_profit": 0.05,
         "trailing_distance": 0.025,
     },
     "Very High Risk": {
-        "allocation_fraction": 0.25,
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
         "stop_loss": -0.10,
         "take_profit": 0.06,
@@ -91,7 +86,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 6,
+        "state_version": 7,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -112,8 +107,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    # Force state reset to version 6 to clear all legacy corrupted positions
-    if not isinstance(state, dict) or state.get("state_version", 1) < 6:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 7:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -171,7 +165,6 @@ def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
     
     if fallback_price is not None and fallback_price > 0:
         return fallback_price
-        
     return 1.0
 
 def get_candles(token_id: str) -> pd.DataFrame:
@@ -251,14 +244,15 @@ def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[fl
 
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
     cash = float(state["cash_usd"])
-    tier_config = RISK_TIERS[tier]
-    spend = min(cash, cash * tier_config["allocation_fraction"])
-    if spend < MIN_POSITION_USD:
+    if cash < POSITION_SIZE_USD:
         return False
+    
+    spend = POSITION_SIZE_USD
     fee = spend * FEE_RATE
     quantity = (spend - fee) / price
     if quantity <= 0:
         return False
+        
     state["cash_usd"] = cash - spend
     state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
     
@@ -353,6 +347,8 @@ def auto_paper_cycle() -> dict[str, Any]:
     for token_id, strat_name, tier in candidates:
         if len(state["positions"]) >= MAX_OPEN_POSITIONS:
             break
+        if float(state["cash_usd"]) < POSITION_SIZE_USD:
+            break
         fallback = state["positions"].get(token_id, {}).get("entry_price")
         price = price_map.get(token_id, get_price_usd(token_id, fallback_price=fallback))
         if paper_buy(state, token_id, price, strat_name, tier):
@@ -366,7 +362,7 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Continuous Multi-Tier Execution")
+    st.caption("Active Paper Trading Simulator • Fixed $10 Sizing • Clean Accounting")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -396,7 +392,7 @@ def render_dashboard() -> None:
 
     st.info(f"Last Cycle: {state.get('last_cycle')} UTC — {state.get('last_cycle_note')}")
 
-    st.subheader("Active Positions (Balanced Risk Tiers)")
+    st.subheader("Active Positions (Fixed $10 Sizing)")
     rows = []
     for tid, pos in state["positions"].items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
@@ -409,6 +405,8 @@ def render_dashboard() -> None:
             "Strategy": pos.get("strategy", ""),
             "Entry ($)": round(entry_p, 4),
             "Current ($)": round(curr_p, 4),
+            "Cost Basis ($)": round(float(pos["cost_usd"]), 2),
+            "Market Val ($)": round(val, 2),
             "Unrealised P/L ($)": round(pnl_pos, 2)
         })
     if rows:
