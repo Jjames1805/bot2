@@ -1,8 +1,8 @@
 """
-Coinbase intraday paper-trading agent (Live Auto-Refreshing Mode)
------------------------------------------------------------------
-Paper trading only. This app uses public Coinbase Exchange market data and never
-submits real orders. It scans markets and simulates buys/sells automatically.
+Coinbase intraday paper-trading agent (Active Evolution & Rotation Mode)
+-----------------------------------------------------------------------
+Paper trading only. Dynamically cuts stagnant positions and rotates capital
+into newly discovered high-momentum opportunities.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ STATE_FILE = APP_DIR / "paper_state.json"
 MEMORY_FILE = APP_DIR / "strategy_memory.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_GBP = 100.0
-FEE_RATE = 0.006  # conservative simulated fee estimate per side
+FEE_RATE = 0.006
 CYCLE_SECONDS = 30
-CANDLE_GRANULARITY = 300  # 5-minute candles
+CANDLE_GRANULARITY = 300
 MAX_OPEN_POSITIONS = 20
 MIN_POSITION_GBP = 2.0
-MAX_POSITION_FRACTION = 0.75  # High risk: up to 75% of available cash per trade
+MAX_POSITION_FRACTION = 0.75
 DEFAULT_MARKET_LIMIT = 40
 REQUEST_TIMEOUT = 12
 
@@ -41,7 +41,7 @@ STRATEGIES = [
     "Trend Pullback",
 ]
 
-st.set_page_config(page_title="Coinbase Paper Trading Agent", layout="wide")
+st.set_page_config(page_title="Coinbase Paper Trading Agent (Evolving)", layout="wide")
 
 
 def utc_now() -> str:
@@ -245,13 +245,11 @@ def paper_buy(state: dict[str, Any], product_id: str, price: float, strategy: st
     if product_id in state["positions"]:
         return False
     if len(state["positions"]) >= MAX_OPEN_POSITIONS:
-        add_event(state, "Buy skipped: maximum open positions reached.", "SKIP")
         return False
     cash = float(state["cash_gbp"])
     budget = min(cash * MAX_POSITION_FRACTION, cash / max(1, MAX_OPEN_POSITIONS - len(state["positions"])))
     budget = min(cash, max(0.0, budget))
     if budget < MIN_POSITION_GBP:
-        add_event(state, f"{product_id}: buy skipped; available cash below minimum.", "SKIP")
         return False
     fee = budget * FEE_RATE
     spend = budget
@@ -337,6 +335,7 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             stats["errors"] += 1
             add_event(state, f"{product_id}: market data error: {exc}", "ERROR")
 
+    # EVOLUTIONARY ROTATION: Check open positions and cut them if momentum flips or stop/take-profit hit
     for product_id in list(state["positions"].keys()):
         try:
             price = price_map.get(product_id) or get_price_gbp(product_id)
@@ -346,16 +345,20 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
             action, reason = signal_map.get(product_id, {}).get(pos.get("strategy"), ("WAIT", "No signal"))
             change = price / float(pos["entry_price"]) - 1
             
-            if action == "SELL" or change <= -0.12 or change >= 0.25:
-                if change <= -0.12:
-                    reason = "Paper stop-loss reached (-12%)."
-                elif change >= 0.25:
-                    reason = "Paper take-profit reached (+25%)."
+            # Active rotation triggers: Sell if strategy outputs SELL, or trailing stop/take-profit hit
+            if action == "SELL" or change <= -0.04 or change >= 0.08:
+                if change <= -0.04:
+                    reason = "Evolutionary stop-loss cut (-4%)."
+                elif change >= 0.08:
+                    reason = "Evolutionary take-profit secured (+8%)."
+                elif action == "SELL":
+                    reason = "Strategy momentum flipped to SELL."
+                
                 if paper_sell(state, product_id, price, reason):
                     stats["sells"] += 1
         except Exception as exc:
             stats["errors"] += 1
-            add_event(state, f"{product_id}: sell/mark error: {exc}", "ERROR")
+            add_event(state, f"{product_id}: rotation/sell error: {exc}", "ERROR")
 
     memory = load_json(MEMORY_FILE, {"strategy_scores": {}})
     strategy_scores = memory.get("strategy_scores", {})
@@ -373,9 +376,9 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
                     trend = float(row["ema21"] / row["ema50"] - 1) if ("ema50" in row and row["ema50"]) else 0.0
                     
                     best_strat = max(buy_strategies, key=lambda s: strategy_scores.get(s, 0.0))
-                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.15)
+                    strat_bonus = max(0.0, strategy_scores.get(best_strat, 0.0) * 0.2)
 
-                    score = (len(buy_strategies) * 15) + strat_bonus + max(-10, min(10, trend * 100))
+                    score = (len(buy_strategies) * 20) + strat_bonus + max(-15, min(15, trend * 100))
                     candidates.append((score, product_id, best_strat))
             except Exception:
                 pass
@@ -406,8 +409,8 @@ def auto_paper_cycle(market_limit: int) -> dict[str, Any]:
 
 
 def render_dashboard() -> None:
-    st.title("Coinbase Paper Trading Agent (High-Risk Mode)")
-    st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
+    st.title("Coinbase Paper Trading Agent (Evolving Mode)")
+    st.caption("Active rotation & self-optimization • Public Coinbase Exchange data")
     
     auto_paper_cycle(DEFAULT_MARKET_LIMIT)
 
