@@ -2,8 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn fee protection, genetic strategy evolution, and upgraded
-Technical Analysis signals (RSI Range Filter, ATR Dynamic Stops, Bollinger Squeezes).
+anti-churn fee protection, genetic strategy evolution, and robust rendering.
 """
 from __future__ import annotations
 
@@ -61,7 +60,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Upgraded Genetic Paper Trading Agent",
+    page_title="Coinbase Self-Evolving Paper Trading Agent",
     layout="wide",
 )
 
@@ -86,11 +85,10 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Upgraded TA genetic engine initialized."
+        st.session_state.last_cycle_note = "Robust rendering engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
-    # Genetic Pool upgraded with RSI, ATR, and Bollinger Band Squeeze parameters
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
             {
@@ -192,12 +190,10 @@ def add_advanced_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFr
     high = out["high"]
     low = out["low"]
     
-    # EMAs
     out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
     out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
     out["vol_avg"] = out["volume"].rolling(14).mean().fillna(1.0)
     
-    # 1. RSI Indicator
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -205,14 +201,12 @@ def add_advanced_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFr
     out["rsi"] = 100 - (100 / (1 + rs))
     out["rsi"] = out["rsi"].fillna(50.0)
     
-    # 2. Average True Range (ATR)
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     out["atr"] = tr.rolling(14).mean().fillna(close * 0.02)
     
-    # 3. Bollinger Bands & Squeeze Ratio
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std().fillna(1e-4)
     out["bb_upper"] = sma20 + (2.0 * std20)
@@ -242,7 +236,6 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     rsi_max = float(strategy_config.get("rsi_max", 70))
     req_squeeze = bool(strategy_config.get("bb_squeeze", False))
     
-    # Filter Checks
     ema_cross = ema_fast > ema_slow
     vol_surge = vol >= (vol_avg * required_vol_mult)
     rsi_in_range = rsi_min <= rsi <= rsi_max
@@ -420,7 +413,6 @@ def auto_paper_cycle() -> dict[str, Any]:
         peak = max(pos.get("peak_price", entry_p), price)
         pos["peak_price"] = peak
         
-        # Upgraded ATR Volatility Stop
         atr_val = float(pos.get("atr", entry_p * 0.02))
         atr_stop_distance = max(tier_cfg["trailing_distance"], (atr_val * 2.5) / entry_p)
         trailing_stop = peak * (1.0 - atr_stop_distance)
@@ -564,17 +556,7 @@ def render_live_dashboard() -> None:
         })
     
     if rows:
-        df_pos = pd.DataFrame(rows)
-        def color_pnl(val):
-            if isinstance(val, (int, float)):
-                if val > 0:
-                    return "color: #2e7d32; font-weight: bold;"
-                elif val < 0:
-                    return "color: #c62828; font-weight: bold;"
-            return ""
-
-        styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
         st.write("Evolving strategies scanning Coinbase markets for upgraded TA setups...")
 
@@ -586,4 +568,8 @@ def render_live_dashboard() -> None:
         st.write("No trades executed yet.")
 
 def main() -> None:
-    init_
+    init_session_state()
+    render_live_dashboard()
+
+if __name__ == "__main__":
+    main()
