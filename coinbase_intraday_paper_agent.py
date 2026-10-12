@@ -1,9 +1,9 @@
 """
-Coinbase intraday paper-trading agent (Clean Evolving & Risk-Tiered Mode)
-------------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Optimized Fee & Evolving Mode)
+--------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with aggressive strategy mutation,
-pruning, and clean table formatting.
+High, and Very High risk buckets (25% each) with reduced fee drag (0.1%),
+active strategy mutation, and multi-tier rotation.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ STATE_FILE = APP_DIR / "paper_state.json"
 MEMORY_FILE = APP_DIR / "strategy_memory.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_GBP = 100.0
-FEE_RATE = 0.006
+FEE_RATE = 0.001  # Reduced from 0.006 to 0.001 (0.1%) to prevent fee drag
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300
 MAX_OPEN_POSITIONS = 20
@@ -245,7 +245,7 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
         if row["rsi"] > rsi_sell:
             return "SELL", f"Mutated RSI exceeded {rsi_sell}."
     elif name == "Bollinger Rebound":
-        if prev["close"] < prev["bb_lower"] and row["close"] >= row["bb_lower"]:
+        if prev["close"] < prev["bb_lower"] and row["close"] >= prev["bb_lower"]:
             return "BUY", "Rebound inside lower Bollinger Band."
         if row["close"] >= row["bb_upper"]:
             return "SELL", "Reached upper Bollinger Band."
@@ -413,7 +413,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             pos = state["positions"][product_id]
             pos["last_price"] = price
             tier = classify_product_tier(product_id)
-            pos["tier"] = tier  # Ensure correct tier assignment
+            pos["tier"] = tier
             tier_cfg = RISK_TIERS[tier]
             
             strat_name = pos.get("strategy", "")
@@ -477,9 +477,8 @@ def auto_paper_cycle() -> dict[str, Any]:
 
 def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Self-Evolving & Risk-Tiered)")
-    st.caption("25% Low | 25% Medium | 25% High | 25% Very High Risk • Live Mutation & Rotation")
+    st.caption("25% Low | 25% Medium | 25% High | 25% Very High Risk • Optimized 0.1% Fee Drag")
     
-    # Reset button in main view to clear old untiered positions
     col_top1, col_top2 = st.columns([3, 1])
     with col_top2:
         if st.button("Reset Account & Clear Tiers", type="secondary", use_container_width=True):
