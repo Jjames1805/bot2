@@ -1,8 +1,8 @@
 """
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
-Paper trading only. Scans online USD-quoted spot tokens with
-clean $100 bankroll accounting.
+Paper trading only. Multi-tier risk-weighted capital allocation
+with dynamic position sizing and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -22,34 +22,41 @@ STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
 CYCLE_SECONDS = 15
 CANDLE_GRANULARITY = 300
-MAX_OPEN_POSITIONS = 5
-POSITION_SIZE_USD = 10.0
 REQUEST_TIMEOUT = 3
 
+# Multi-Tier Risk Allocation & Profit Appetite Configuration
 RISK_TIERS = {
     "Low Risk": {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
+        "capital_fraction": 0.20,  # 20% of portfolio capital
+        "max_positions": 3,
         "stop_loss": -0.03,
-        "take_profit": 0.06,
-        "trailing_distance": 0.02,
+        "take_profit": 0.05,
+        "trailing_distance": 0.015,
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.04,
-        "take_profit": 0.09,
-        "trailing_distance": 0.025,
+        "capital_fraction": 0.30,  # 30% of portfolio capital
+        "max_positions": 4,
+        "stop_loss": -0.05,
+        "take_profit": 0.08,
+        "trailing_distance": 0.02,
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.06,
-        "take_profit": 0.14,
-        "trailing_distance": 0.035,
+        "capital_fraction": 0.30,  # 30% of portfolio capital
+        "max_positions": 4,
+        "stop_loss": -0.08,
+        "take_profit": 0.12,
+        "trailing_distance": 0.03,
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
-        "stop_loss": -0.08,
+        "capital_fraction": 0.20,  # 20% of portfolio capital
+        "max_positions": 3,
+        "stop_loss": -0.12,
         "take_profit": 0.20,
-        "trailing_distance": 0.045,
+        "trailing_distance": 0.04,
     },
 }
 
@@ -59,7 +66,7 @@ BASE_STRATEGIES = [
 ]
 
 st.set_page_config(
-    page_title="Coinbase Paper Trading Agent (Universal USD Spot Mode)",
+    page_title="Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)",
     layout="wide",
 )
 
@@ -81,7 +88,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Clean bankroll initialized."
+        st.session_state.last_cycle_note = "Multi-tier risk engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
 
@@ -95,7 +102,7 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     response = requests.get(
         BASE_URL + path,
         params=params,
-        headers={"User-Agent": "CoinbasePaperAgent/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "CoinbaseRiskAgent/1.0", "Accept": "application/json"},
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -181,17 +188,37 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     
     return "WAIT", "Waiting for high-conviction setup."
 
-def get_total_cost_basis() -> float:
-    return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
+def get_tier_allocation(tier_name: str) -> float:
+    total_bankroll = STARTING_CASH_USD + st.session_state.realized_pnl
+    tier_cfg = RISK_TIERS[tier_name]
+    return max(0.0, total_bankroll * tier_cfg["capital_fraction"])
+
+def get_tier_current_invested(tier_name: str) -> float:
+    return sum(
+        float(pos["cost_usd"])
+        for pos in st.session_state.positions.values()
+        if pos.get("tier") == tier_name
+    )
+
+def count_tier_positions(tier_name: str) -> int:
+    return sum(1 for pos in st.session_state.positions.values() if pos.get("tier") == tier_name)
 
 def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
-    current_invested = get_total_cost_basis()
-    available_cash = STARTING_CASH_USD + st.session_state.realized_pnl - current_invested
-    
-    if available_cash < POSITION_SIZE_USD or len(st.session_state.positions) >= MAX_OPEN_POSITIONS:
+    tier_cfg = RISK_TIERS[tier]
+    if count_tier_positions(tier) >= tier_cfg["max_positions"]:
         return False
     
-    spend = POSITION_SIZE_USD
+    tier_budget = get_tier_allocation(tier)
+    tier_invested = get_tier_current_invested(tier)
+    available_tier_cash = tier_budget - tier_invested
+    
+    # Position size is dynamically sized based on remaining tier budget and max positions allowed
+    target_pos_size = tier_budget / tier_cfg["max_positions"]
+    spend = min(available_tier_cash, target_pos_size)
+    
+    if spend < 5.0:  # Minimum viable position size check
+        return False
+    
     fee = spend * FEE_RATE
     quantity = (spend - fee) / price
     if quantity <= 0:
@@ -216,7 +243,7 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
         "price_usd": clean_price, "quantity": float(quantity), "value_usd": float(spend),
         "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
-    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)}.", "BUY")
+    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)} (Allocation: {money(spend)}).", "BUY")
     return True
 
 def paper_sell(token_id: str, price: float, reason: str) -> bool:
@@ -251,7 +278,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = BASE_STRATEGIES
     
-    scan_tokens = random.sample(tokens, min(len(tokens), 15))
+    scan_tokens = random.sample(tokens, min(len(tokens), 18))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
@@ -296,8 +323,6 @@ def auto_paper_cycle() -> dict[str, Any]:
 
     random.shuffle(candidates)
     for token_id, strat_name, tier in candidates:
-        if len(st.session_state.positions) >= MAX_OPEN_POSITIONS:
-            break
         if paper_buy(token_id, price_map.get(token_id, get_price_usd(token_id)), strat_name, tier):
             stats["buys"] += 1
 
@@ -310,8 +335,8 @@ def auto_paper_cycle() -> dict[str, Any]:
 def render_live_dashboard() -> None:
     init_session_state()
     
-    st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Clean $100 Bankroll Accounting")
+    st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
+    st.caption("Active Paper Trading Simulator • Risk-Weighted Capital Distribution")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -331,22 +356,22 @@ def render_live_dashboard() -> None:
         
     holdings_val = 0.0
     unrealized_pnl = 0.0
+    total_cost_basis = 0.0
     for tid, pos in st.session_state.positions.items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
         val = float(pos.get("quantity", 0.0)) * curr_p
         holdings_val += val
+        total_cost_basis += float(pos["cost_usd"])
         unrealized_pnl += (val - float(pos["cost_usd"]))
 
-    cost_basis = get_total_cost_basis()
-    # Total Portfolio Value is strictly Starting Capital + Realized P/L + Unrealized P/L
     total_val = STARTING_CASH_USD + st.session_state.realized_pnl + unrealized_pnl
-    cash = STARTING_CASH_USD + st.session_state.realized_pnl - cost_basis
+    cash = STARTING_CASH_USD + st.session_state.realized_pnl - total_cost_basis
     total_net_pnl = st.session_state.realized_pnl + unrealized_pnl
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Portfolio Value", money(total_val), delta=money(total_net_pnl))
     c2.metric("Available Cash", money(cash))
-    c3.metric("Open Positions", f"{len(st.session_state.positions)} / {MAX_OPEN_POSITIONS}")
+    c3.metric("Open Positions", f"{len(st.session_state.positions)} active")
 
     st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
 
@@ -360,6 +385,22 @@ def render_live_dashboard() -> None:
         {"Metric": "Total Net P/L", "Amount": money(total_net_pnl)},
     ])
     st.dataframe(ledger_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Risk Tier Capital Allocation")
+    tier_rows = []
+    for tier_name, cfg in RISK_TIERS.items():
+        budget = get_tier_allocation(tier_name)
+        invested = get_tier_current_invested(tier_name)
+        pos_count = count_tier_positions(tier_name)
+        tier_rows.append({
+            "Risk Tier": tier_name,
+            "Allocation Target (%)": f"{int(cfg['capital_fraction'] * 100)}%",
+            "Budget ($)": round(budget, 2),
+            "Invested ($)": round(invested, 2),
+            "Open Positions": f"{pos_count} / {cfg['max_positions']}",
+            "Stop Loss / Take Profit": f"{cfg['stop_loss']*100:.1f}% / +{cfg['take_profit']*100:.1f}%"
+        })
+    st.dataframe(pd.DataFrame(tier_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Active Positions")
     rows = []
@@ -381,7 +422,7 @@ def render_live_dashboard() -> None:
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.write("Scanning for next high-conviction trade opportunity...")
+        st.write("Scanning multi-tier markets for high-conviction breakout opportunities...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
