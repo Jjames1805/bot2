@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Timed Genetic Evolution Every 2 Cycles)
----------------------------------------------------------------------
+Coinbase Paper Trading Agent (Timed Genetic Evolution & Session State Fix)
+------------------------------------------------------------------------
 Scans all Coinbase USD spot pairs automatically every 30 seconds, 
-mutating strategy parameters every 2 cycles with updated risk weightings.
+mutates strategy parameters every 2 cycles, and updates the strategy pool UI table instantly.
 """
 from __future__ import annotations
 
@@ -294,6 +294,7 @@ def evolve_strategies_genetic() -> str:
     }
     
     pool[-1] = mutated_strat
+    st.session_state.strategies = list(pool)  # Force session state list re-assignment for instant UI update
     add_event(f"🧬 Timed Genetic Evolution (2-Cycle): Spawned variant {mutated_strat['name']}.", "EVOLVE")
     return f"Evolved! Spawned {mutated_strat['name']}."
 
