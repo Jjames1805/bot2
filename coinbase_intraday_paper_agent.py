@@ -1,9 +1,9 @@
 """
-Coinbase intraday paper-trading agent (Fixed Multi-Tier Risk-Weighted Mode)
--------------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Clean Evolving & Risk-Tiered Mode)
+------------------------------------------------------------------------
 Paper trading only. Automatically segments capital into Low, Medium,
-High, and Very High risk buckets (25% each) with active strategy mutation
-and multi-tier position rotation.
+High, and Very High risk buckets (25% each) with aggressive strategy mutation,
+pruning, and clean table formatting.
 """
 
 from __future__ import annotations
@@ -412,7 +412,8 @@ def auto_paper_cycle() -> dict[str, Any]:
             price_map[product_id] = price
             pos = state["positions"][product_id]
             pos["last_price"] = price
-            tier = pos.get("tier", "Medium Risk")
+            tier = classify_product_tier(product_id)
+            pos["tier"] = tier  # Ensure correct tier assignment
             tier_cfg = RISK_TIERS[tier]
             
             strat_name = pos.get("strategy", "")
@@ -478,6 +479,14 @@ def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (Self-Evolving & Risk-Tiered)")
     st.caption("25% Low | 25% Medium | 25% High | 25% Very High Risk • Live Mutation & Rotation")
     
+    # Reset button in main view to clear old untiered positions
+    col_top1, col_top2 = st.columns([3, 1])
+    with col_top2:
+        if st.button("Reset Account & Clear Tiers", type="secondary", use_container_width=True):
+            save_json(STATE_FILE, default_state())
+            st.success("Account reset successfully!")
+            st.rerun()
+
     auto_paper_cycle()
 
     state = load_state()
@@ -511,9 +520,10 @@ def render_dashboard() -> None:
         price = prices.get(product_id, float(pos.get("last_price", pos["entry_price"])))
         market_value = float(pos["quantity"]) * price
         unrealised = market_value - float(pos["cost_gbp"])
+        tier_label = classify_product_tier(product_id)
         positions_rows.append({
             "Market": product_id,
-            "Risk Tier": pos.get("tier", "Medium Risk"),
+            "Risk Tier": tier_label,
             "Evolving Strategy": pos.get("strategy", ""),
             "Entry (£)": round(float(pos["entry_price"]), 6),
             "Current (£)": round(price, 6),
