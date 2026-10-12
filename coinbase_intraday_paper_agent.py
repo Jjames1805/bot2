@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Stable Manual & Auto Refresh Engine)
-------------------------------------------------------------------
-Scans all Coinbase USD spot pairs reliably with clear diagnostics, 
-genetic strategy tracking, and anti-churn fee protection.
+Coinbase Paper Trading Agent (Fully Automated Full-Market Engine)
+----------------------------------------------------------------
+Scans all Coinbase USD spot pairs automatically every 30 seconds, 
+with relaxed breakout filters to guarantee active paper trade execution.
 """
 from __future__ import annotations
 
@@ -21,9 +21,10 @@ import streamlit as st
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
+CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 14400
 REQUEST_TIMEOUT = 3
-CANDLE_BATCH_SIZE = 30
+CANDLE_BATCH_SIZE = 35
 
 RISK_TIERS = {
     "Low Risk": {
@@ -61,7 +62,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Full-Market Scanner",
+    page_title="Coinbase Automated Full-Market Agent",
     layout="wide",
 )
 
@@ -86,7 +87,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Stable engine initialized."
+        st.session_state.last_cycle_note = "Automated engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -95,21 +96,24 @@ def init_session_state() -> None:
         st.session_state.scan_index = 0
     if "price_cache" not in st.session_state:
         st.session_state.price_cache = {}
+    if "last_refresh_time" not in st.session_state:
+        st.session_state.last_refresh_time = time.time()
     
+    # Relaxed parameters to ensure active trade execution
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
             {
-                "name": "Alpha-V1 (BB Squeeze + Vol Breakout)",
-                "fast": 8, "slow": 21, "vol_mult": 1.75,
-                "rsi_min": 45, "rsi_max": 68,
-                "bb_squeeze": True, "atr_multiplier": 2.5,
+                "name": "Alpha-V1 (Relaxed Momentum)",
+                "fast": 5, "slow": 13, "vol_mult": 1.10,
+                "rsi_min": 30, "rsi_max": 80,
+                "bb_squeeze": False, "atr_multiplier": 2.0,
                 "pnl": 0.0, "trades_count": 0
             },
             {
-                "name": "Alpha-V2 (Dynamic ATR Volatility Momentum)",
-                "fast": 5, "slow": 15, "vol_mult": 1.50,
-                "rsi_min": 40, "rsi_max": 72,
-                "bb_squeeze": False, "atr_multiplier": 2.0,
+                "name": "Alpha-V2 (Trend Breakout)",
+                "fast": 8, "slow": 21, "vol_mult": 1.20,
+                "rsi_min": 35, "rsi_max": 75,
+                "bb_squeeze": False, "atr_multiplier": 2.5,
                 "pnl": 0.0, "trades_count": 0
             },
         ]
@@ -220,11 +224,11 @@ def add_advanced_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFr
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str, float]:
-    fast = int(strategy_config.get("fast", 8))
-    slow = max(fast + 2, int(strategy_config.get("slow", 21)))
+    fast = int(strategy_config.get("fast", 5))
+    slow = max(fast + 1, int(strategy_config.get("slow", 13)))
     data = add_advanced_indicators(df, fast=fast, slow=slow)
-    if len(data) < 20:
-        return "WAIT", "Insufficient candle data.", 0.0
+    if len(data) < 15:
+        return "WAIT", "Insufficient data.", 0.0
     row = data.iloc[-1]
     
     ema_fast = float(row["ema_fast"])
@@ -232,23 +236,21 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     vol = float(row["volume"])
     vol_avg = float(row["vol_avg"])
     rsi = float(row["rsi"])
-    is_squeezed = bool(row["bb_squeeze"])
     
-    required_vol_mult = float(strategy_config.get("vol_mult", 1.75))
-    rsi_min = float(strategy_config.get("rsi_min", 40))
-    rsi_max = float(strategy_config.get("rsi_max", 70))
-    req_squeeze = bool(strategy_config.get("bb_squeeze", False))
+    required_vol_mult = float(strategy_config.get("vol_mult", 1.10))
+    rsi_min = float(strategy_config.get("rsi_min", 30))
+    rsi_max = float(strategy_config.get("rsi_max", 80))
     
-    ema_cross = ema_fast > ema_slow
+    # Relaxed conditions to ensure signals trigger
+    ema_cross = ema_fast >= ema_slow
     vol_surge = vol >= (vol_avg * required_vol_mult)
     rsi_in_range = rsi_min <= rsi <= rsi_max
-    squeeze_pass = (not req_squeeze) or is_squeezed
     
-    if ema_cross and vol_surge and rsi_in_range and squeeze_pass:
-        strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
-        return "BUY", f"Breakout ({strategy_config['name']})", strength
+    if ema_cross and rsi_in_range:
+        strength = (ema_fast - ema_slow) / (ema_slow + 1e-6) + (vol / (vol_avg + 1.0))
+        return "BUY", f"Signal Triggered ({strategy_config['name']})", strength
     
-    return "WAIT", "Waiting for TA setup.", 0.0
+    return "WAIT", "Waiting for setup.", 0.0
 
 def evolve_strategies_genetic() -> str:
     pool = st.session_state.strategies
@@ -259,22 +261,18 @@ def evolve_strategies_genetic() -> str:
     best_strat = pool[0]
     
     mutation_id = random.randint(100, 999)
-    new_fast = max(3, int(best_strat["fast"] + random.choice([-2, -1, 1, 2])))
-    new_slow = max(new_fast + 4, int(best_strat["slow"] + random.choice([-3, -1, 2, 4])))
-    new_vol = round(max(1.3, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.1, 0.0, 0.1]))), 2)
-    new_rsi_min = max(35, min(50, int(best_strat.get("rsi_min", 40) + random.choice([-3, 0, 3]))))
-    new_rsi_max = max(65, min(80, int(best_strat.get("rsi_max", 70) + random.choice([-3, 0, 3]))))
-    new_atr_mult = round(max(1.5, min(4.0, float(best_strat.get("atr_multiplier", 2.5)) + random.choice([-0.2, 0.2]))), 1)
+    new_fast = max(3, int(best_strat["fast"] + random.choice([-1, 1])))
+    new_slow = max(new_fast + 2, int(best_strat["slow"] + random.choice([-2, 2])))
     
     mutated_strat = {
-        "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow}/V:{new_vol}/RSI:{new_rsi_min}-{new_rsi_max})",
+        "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow})",
         "fast": new_fast,
         "slow": new_slow,
-        "vol_mult": new_vol,
-        "rsi_min": new_rsi_min,
-        "rsi_max": new_rsi_max,
-        "bb_squeeze": random.choice([True, False]),
-        "atr_multiplier": new_atr_mult,
+        "vol_mult": 1.10,
+        "rsi_min": 30,
+        "rsi_max": 80,
+        "bb_squeeze": False,
+        "atr_multiplier": 2.0,
         "pnl": 0.0,
         "trades_count": 0
     }
@@ -489,7 +487,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Evaluated batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
+    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -497,22 +495,18 @@ def main() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Coverage • Manual & Auto Refresh Controls • ATR Trailing Stops")
+    st.caption("Full Market Coverage • Fully Automated (30s Interval) • Active Trade Execution")
 
     # Control Bar
-    col_btn1, col_btn2, col_info = st.columns([1, 1, 2])
+    col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
-        if st.button("🔄 Run Market Scan & Refresh Now", type="primary", use_container_width=True):
-            auto_paper_cycle()
-            st.rerun()
-    with col_btn2:
         if st.button("🗑️ Reset Account", use_container_width=True):
             st.session_state.clear()
             init_session_state()
             st.success("Account reset!")
             st.rerun()
 
-    # Automatically trigger a cycle if none has run yet
+    # Run initial cycle if none executed yet
     if st.session_state.last_cycle is None:
         auto_paper_cycle()
 
@@ -539,7 +533,7 @@ def main() -> None:
     c2.metric("Available Cash", money(cash))
     c3.metric("Open Positions", f"{len(st.session_state.positions)} active")
 
-    st.info(f"Last Cycle: {st.session_state.last_cycle or 'Initializing...'} — {st.session_state.last_cycle_note}")
+    st.info(f"Last Cycle: {st.session_state.last_cycle or 'Running...'} — {st.session_state.last_cycle_note}")
 
     st.subheader("Evolving Strategies Pool")
     strat_rows = []
@@ -549,9 +543,9 @@ def main() -> None:
             "Fast EMA": s["fast"],
             "Slow EMA": s["slow"],
             "Min Volume Mult": s["vol_mult"],
-            "RSI Range": f"{s.get('rsi_min', 40)} - {s.get('rsi_max', 70)}",
+            "RSI Range": f"{s.get('rsi_min', 30)} - {s.get('rsi_max', 80)}",
             "BB Squeeze Req": s.get("bb_squeeze", False),
-            "ATR Mult": s.get("atr_multiplier", 2.5),
+            "ATR Mult": s.get("atr_multiplier", 2.0),
             "Closed Trades": s["trades_count"],
             "Attributed P/L ($)": round(s["pnl"], 2)
         })
@@ -588,7 +582,7 @@ def main() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Click '🔄 Run Market Scan & Refresh Now' to evaluate all markets and trigger entries.")
+        st.write("Agent is scanning markets and opening active positions automatically...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
@@ -596,7 +590,7 @@ def main() -> None:
         df_trades = pd.DataFrame(trades)
         st.dataframe(df_trades, use_container_width=True, hide_index=True)
     else:
-        st.write("No trades executed yet.")
+        st.write("No trades executed yet. The agent will execute trades as market setups match.")
 
     st.subheader("Agent Activity Log")
     event_rows = []
@@ -604,6 +598,16 @@ def main() -> None:
         event_rows.append({"Time (UTC)": ev["time"], "Type": ev["type"], "Message": ev["message"]})
     if event_rows:
         st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
+
+    # Automated background timer for 30-second refresh
+    elapsed = time.time() - st.session_state.last_refresh_time
+    if elapsed >= CYCLE_SECONDS:
+        st.session_state.last_refresh_time = time.time()
+        auto_paper_cycle()
+        st.rerun()
+    else:
+        time.sleep(1)
+        st.rerun()
 
 if __name__ == "__main__":
     main()
