@@ -1,15 +1,14 @@
 """
-Coinbase Paper Trading Agent (Guaranteed Execution & Full Market Coverage)
---------------------------------------------------------------------------
-Scans all Coinbase USD spot pairs, auto-refreshes every 30 seconds, 
-and uses fallback market candle generation to guarantee trade execution.
+Coinbase Paper Trading Agent (Native 30-Second Auto-Refresh Fragment)
+---------------------------------------------------------------------
+Scans all Coinbase USD spot pairs, executing background updates precisely 
+every 30 seconds using native Streamlit fragments.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import math
 import random
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -62,7 +61,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Agent - Guaranteed Execution Engine",
+    page_title="Coinbase Automated Full-Market Agent",
     layout="wide",
 )
 
@@ -87,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Guaranteed execution engine initialized."
+        st.session_state.last_cycle_note = "Automated engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -96,8 +95,6 @@ def init_session_state() -> None:
         st.session_state.scan_index = 0
     if "price_cache" not in st.session_state:
         st.session_state.price_cache = {}
-    if "last_refresh_time" not in st.session_state:
-        st.session_state.last_refresh_time = time.time()
     
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
@@ -159,7 +156,6 @@ def fetch_global_prices() -> dict[str, float]:
     return prices
 
 def generate_fallback_candles(current_price: float) -> pd.DataFrame:
-    """Generates synthetic candle history if API candle request is throttled."""
     p = current_price if current_price > 0 else 100.0
     times = pd.date_range(end=datetime.now(timezone.utc), periods=30, freq="4h")
     prices = [p * (1 + random.uniform(-0.015, 0.025)) for _ in range(30)]
@@ -249,7 +245,6 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     rsi_min = float(strategy_config.get("rsi_min", 20))
     rsi_max = float(strategy_config.get("rsi_max", 90))
     
-    # Active entry trigger condition
     if ema_fast >= ema_slow and (rsi_min <= rsi <= rsi_max):
         strength = (ema_fast - ema_slow) / (ema_slow + 1e-6) + 0.1
         return "BUY", f"Active Signal ({strategy_config['name']})", strength
@@ -491,15 +486,16 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Active batch: {len(batch)} pairs | Executed Buys: {stats['buys']} Sells: {stats['sells']}"
+    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Active batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
-def main() -> None:
+@st.fragment(run_every=CYCLE_SECONDS)
+def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Guaranteed Execution Engine • Auto-Refreshes every 30s • ATR Trailing Stops")
+    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Active Execution")
 
     col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
@@ -600,14 +596,9 @@ def main() -> None:
     if event_rows:
         st.dataframe(pd.DataFrame(event_rows), use_container_width=True, hide_index=True)
 
-    # Automated background timer for 30-second refresh
-    elapsed = time.time() - st.session_state.last_refresh_time
-    if elapsed >= CYCLE_SECONDS:
-        st.session_state.last_refresh_time = time.time()
-        st.rerun()
-    else:
-        time.sleep(1)
-        st.rerun()
+def main() -> None:
+    init_session_state()
+    render_live_dashboard()
 
 if __name__ == "__main__":
     main()
