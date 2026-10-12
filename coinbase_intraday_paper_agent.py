@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk-weighted capital allocation
-with correct metric delta coloring and pristine bankroll accounting.
+with color-styled P/L columns and pristine bankroll accounting.
 """
 from __future__ import annotations
 
@@ -339,7 +339,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Multi-Tier Risk Allocation)")
-    st.caption("Active Paper Trading Simulator • Corrected Delta Coloring")
+    st.caption("Active Paper Trading Simulator • Color-Coded P/L Columns")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -422,8 +422,19 @@ def render_live_dashboard() -> None:
             "Market Val ($)": round(val, 2),
             "Unrealised P/L ($)": round(pnl_pos, 2)
         })
+    
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        df_pos = pd.DataFrame(rows)
+        def color_pnl(val):
+            if isinstance(val, (int, float)):
+                if val > 0:
+                    return "color: #2e7d32; font-weight: bold;"
+                elif val < 0:
+                    return "color: #c62828; font-weight: bold;"
+            return ""
+
+        styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.write("Scanning multi-tier markets for high-conviction breakout opportunities...")
 
