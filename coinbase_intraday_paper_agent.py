@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-1.75x volume filters, duplicate purchase guards, and pristine accounting.
+1.75x volume filters, strict candidate deduplication, and clean accounting.
 """
 from __future__ import annotations
 
@@ -331,21 +331,27 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "4H Trailing profit secured."):
                 stats["sells"] += 1
 
-    candidates = []
-    seen_candidates = set(st.session_state.positions.keys())
+    # Strict candidate deduplication map per token
+    candidates_map = {}
+    held_tokens = set(st.session_state.positions.keys())
+    
     for token_id, df in market_candles.items():
-        if token_id in seen_candidates:
+        if token_id in held_tokens:
             continue
         for strat in active_strategies:
             action, _, strength = adaptive_strategy_signal(df, strat)
-            if action == "BUY" and token_id not in seen_candidates:
-                seen_candidates.add(token_id)
+            if action == "BUY":
                 tier = classify_token_tier(token_id)
-                candidates.append((token_id, strat["name"], tier, strength))
+                if token_id not in candidates_map or strength > candidates_map[token_id][2]:
+                    candidates_map[token_id] = (strat["name"], tier, strength)
 
+    candidates = [(tid, data[0], data[1], data[2]) for tid, data in candidates_map.items()]
     candidates.sort(key=lambda x: x[3], reverse=True)
 
     for token_id, strat_name, tier, strength in candidates:
+        if token_id in st.session_state.positions:
+            continue
+            
         tier_cfg = RISK_TIERS[tier]
         current_tier_count = count_tier_positions(tier)
         
@@ -448,46 +454,4 @@ def render_live_dashboard() -> None:
     st.subheader("Active Positions")
     rows = []
     for tid, pos in st.session_state.positions.items():
-        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
-        entry_p = float(pos.get("entry_price", curr_p))
-        val = float(pos["quantity"]) * curr_p
-        pnl_pos = val - float(pos["cost_usd"])
-        rows.append({
-            "Token": tid,
-            "Risk Tier": pos.get("tier", "Medium Risk"),
-            "Strategy": pos.get("strategy", ""),
-            "Entry ($)": round(entry_p, 4),
-            "Current ($)": round(curr_p, 4),
-            "Cost Basis ($)": round(float(pos["cost_usd"]), 2),
-            "Market Val ($)": round(val, 2),
-            "Unrealised P/L ($)": round(pnl_pos, 2)
-        })
-    
-    if rows:
-        df_pos = pd.DataFrame(rows)
-        def color_pnl(val):
-            if isinstance(val, (int, float)):
-                if val > 0:
-                    return "color: #2e7d32; font-weight: bold;"
-                elif val < 0:
-                    return "color: #c62828; font-weight: bold;"
-            return ""
-
-        styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
-    else:
-        st.write("Waiting for 4H volume expansion across Coinbase markets...")
-
-    st.subheader("Recent Executed Trades")
-    trades = st.session_state.trades[:20]
-    if trades:
-        st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
-    else:
-        st.write("No trades executed yet.")
-
-def main() -> None:
-    init_session_state()
-    render_live_dashboard()
-
-if __name__ == "__main__":
-    main()
+        curr_p =
