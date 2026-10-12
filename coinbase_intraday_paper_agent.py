@@ -1,8 +1,8 @@
 """
-Coinbase Paper Trading Agent (Updated Capital Allocations & Live Pricing)
--------------------------------------------------------------------------
+Coinbase Paper Trading Agent (Timed Genetic Evolution & Live Pricing)
+--------------------------------------------------------------------
 Scans all Coinbase USD spot pairs automatically every 30 seconds, 
-with updated risk tier weightings, parallel ticker pricing, and auto-refresh.
+mutates strategy parameters on a regular cycle timer, and updates live pricing.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Updated risk allocations initialized."
+        st.session_state.last_cycle_note = "Timed genetic evolution engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     if "all_tokens_cache" not in st.session_state:
@@ -95,6 +95,8 @@ def init_session_state() -> None:
         st.session_state.scan_index = 0
     if "price_cache" not in st.session_state:
         st.session_state.price_cache = {}
+    if "cycle_count" not in st.session_state:
+        st.session_state.cycle_count = 0
     
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
@@ -292,7 +294,7 @@ def evolve_strategies_genetic() -> str:
     }
     
     pool[-1] = mutated_strat
-    add_event(f"🧬 Genetic Evolution: Spawned variant {mutated_strat['name']}.", "EVOLVE")
+    add_event(f"🧬 Timed Genetic Evolution: Spawned variant {mutated_strat['name']}.", "EVOLVE")
     return f"Evolved! Spawned {mutated_strat['name']}."
 
 def get_total_cost_basis() -> float:
@@ -390,14 +392,16 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
     })
     add_event(f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
     del st.session_state.positions[token_id]
-    
-    if len(st.session_state.trades) % 2 == 0:
-        evolve_strategies_genetic()
-        
     return True
 
 def auto_paper_cycle() -> dict[str, Any]:
     stats = {"markets": 0, "buys": 0, "sells": 0, "rotations": 0}
+    
+    # Increment cycle counter and trigger timed evolution every 3 cycles
+    st.session_state.cycle_count = st.session_state.get("cycle_count", 0) + 1
+    if st.session_state.cycle_count % 3 == 0:
+        evolve_strategies_genetic()
+
     all_tokens = fetch_all_coinbase_pairs()
     stats["markets"] = len(all_tokens)
 
@@ -503,7 +507,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Scanned {len(all_tokens)} markets | Batch: {len(batch)} pairs | Buys: {stats['buys']} Sells: {stats['sells']}"
+    st.session_state.last_cycle_note = f"Cycle #{st.session_state.cycle_count} | Scanned {len(all_tokens)} markets | Buys: {stats['buys']} Sells: {stats['sells']}"
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -512,7 +516,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Full Market Coverage • Native 30s Auto-Refresh Fragment • Updated Risk Weightings")
+    st.caption("Full Market Coverage • Timed Genetic Mutation Every 3 Cycles • Live Pricing")
 
     col_btn1, col_info = st.columns([1, 3])
     with col_btn1:
