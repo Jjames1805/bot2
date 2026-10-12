@@ -2,7 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-in-memory session state accounting for 100% accurate math.
+clean $100 bankroll accounting.
 """
 from __future__ import annotations
 
@@ -70,10 +70,8 @@ def money(value: float) -> str:
     return f"${float(value):,.2f}"
 
 def init_session_state() -> None:
-    if "cash_usd" not in st.session_state:
-        st.session_state.cash_usd = STARTING_CASH_USD
-    if "starting_cash_usd" not in st.session_state:
-        st.session_state.starting_cash_usd = STARTING_CASH_USD
+    if "realized_pnl" not in st.session_state:
+        st.session_state.realized_pnl = 0.0
     if "positions" not in st.session_state:
         st.session_state.positions = {}
     if "trades" not in st.session_state:
@@ -83,7 +81,7 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "In-memory session initialized."
+        st.session_state.last_cycle_note = "Clean bankroll initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
 
@@ -183,9 +181,14 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     
     return "WAIT", "Waiting for high-conviction setup."
 
+def get_total_cost_basis() -> float:
+    return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
+
 def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
-    cash = float(st.session_state.cash_usd)
-    if cash < POSITION_SIZE_USD:
+    current_invested = get_total_cost_basis()
+    available_cash = STARTING_CASH_USD + st.session_state.realized_pnl - current_invested
+    
+    if available_cash < POSITION_SIZE_USD or len(st.session_state.positions) >= MAX_OPEN_POSITIONS:
         return False
     
     spend = POSITION_SIZE_USD
@@ -194,7 +197,6 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
     if quantity <= 0:
         return False
         
-    st.session_state.cash_usd = cash - spend
     st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
     
     clean_price = float(price)
@@ -227,7 +229,7 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
     proceeds = gross - fee
     pnl = proceeds - float(pos["cost_usd"])
     
-    st.session_state.cash_usd = float(st.session_state.cash_usd) + float(pos["cost_usd"]) + pnl
+    st.session_state.realized_pnl += pnl
     st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
     
     tier = pos.get("tier", "Medium Risk")
@@ -296,11 +298,7 @@ def auto_paper_cycle() -> dict[str, Any]:
     for token_id, strat_name, tier in candidates:
         if len(st.session_state.positions) >= MAX_OPEN_POSITIONS:
             break
-        if float(st.session_state.cash_usd) < POSITION_SIZE_USD:
-            break
-        fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
-        price = price_map.get(token_id, get_price_usd(token_id, fallback_price=fallback))
-        if paper_buy(token_id, price, strat_name, tier):
+        if paper_buy(token_id, price_map.get(token_id, get_price_usd(token_id)), strat_name, tier):
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
@@ -313,7 +311,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • In-Memory Session Accounting")
+    st.caption("Active Paper Trading Simulator • Clean $100 Bankroll Accounting")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -332,16 +330,21 @@ def render_live_dashboard() -> None:
         pos["last_price"] = prices[tid]
         
     holdings_val = 0.0
+    unrealized_pnl = 0.0
     for tid, pos in st.session_state.positions.items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
-        holdings_val += float(pos.get("quantity", 0.0)) * curr_p
+        val = float(pos.get("quantity", 0.0)) * curr_p
+        holdings_val += val
+        unrealized_pnl += (val - float(pos["cost_usd"]))
 
-    cash = float(st.session_state.cash_usd)
-    total_val = cash + holdings_val
-    pnl = total_val - STARTING_CASH_USD
+    cost_basis = get_total_cost_basis()
+    # Total Portfolio Value is strictly Starting Capital + Realized P/L + Unrealized P/L
+    total_val = STARTING_CASH_USD + st.session_state.realized_pnl + unrealized_pnl
+    cash = STARTING_CASH_USD + st.session_state.realized_pnl - cost_basis
+    total_net_pnl = st.session_state.realized_pnl + unrealized_pnl
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Portfolio Value", money(total_val), delta=money(pnl))
+    c1.metric("Total Portfolio Value", money(total_val), delta=money(total_net_pnl))
     c2.metric("Available Cash", money(cash))
     c3.metric("Open Positions", f"{len(st.session_state.positions)} / {MAX_OPEN_POSITIONS}")
 
@@ -350,10 +353,11 @@ def render_live_dashboard() -> None:
     st.subheader("Portfolio Ledger Breakdown")
     ledger_df = pd.DataFrame([
         {"Metric": "Starting Capital", "Amount": money(STARTING_CASH_USD)},
+        {"Metric": "Realized P/L", "Amount": money(st.session_state.realized_pnl)},
         {"Metric": "Available Cash", "Amount": money(cash)},
         {"Metric": "Holdings Market Value", "Amount": money(holdings_val)},
         {"Metric": "Total Portfolio Value", "Amount": money(total_val)},
-        {"Metric": "Total Net P/L", "Amount": money(pnl)},
+        {"Metric": "Total Net P/L", "Amount": money(total_net_pnl)},
     ])
     st.dataframe(ledger_df, use_container_width=True, hide_index=True)
 
