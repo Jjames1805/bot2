@@ -1,7 +1,7 @@
 """
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
-Paper trading only. Scans ALL online USD-quoted spot tokens on Coinbase
+Paper trading only. Scans online USD-quoted spot tokens on Coinbase
 Exchange with volume-weighted entries, trailing stops, and 4-tier risk
 allocation (25% each).
 """
@@ -30,7 +30,7 @@ CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300
 MAX_OPEN_POSITIONS = 20
 MIN_POSITION_USD = 2.0
-REQUEST_TIMEOUT = 12
+REQUEST_TIMEOUT = 5  # Reduced timeout to keep UI snappy
 
 # 4-Tier Risk Classification (25% capital allocation per tier)
 RISK_TIERS = {
@@ -57,7 +57,7 @@ RISK_TIERS = {
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
-        "assets": [],  # Populated dynamically from all remaining exchange USD spot tokens
+        "assets": [],  # Populated dynamically
         "stop_loss": -0.18,
         "take_profit": 0.45,
         "trailing_distance": 0.07,
@@ -149,7 +149,7 @@ def get_usd_spot_tokens() -> list[str]:
             pid = item.get("id", "")
             if pid.endswith("-USD") and item.get("status") == "online":
                 result.append(pid)
-        return result
+        return result if result else ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
     except Exception:
         return ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
 
@@ -371,18 +371,25 @@ def auto_paper_cycle() -> dict[str, Any]:
         add_event(state, state["last_cycle_note"], "ERROR")
         save_json(STATE_FILE, state)
         return stats
+    
     explicit_listed = set(RISK_TIERS["Low Risk"]["assets"] + RISK_TIERS["Medium Risk"]["assets"] + RISK_TIERS["High Risk"]["assets"])
     RISK_TIERS["Very High Risk"]["assets"] = [p for p in tokens if p not in explicit_listed]
+    
     price_map: dict[str, float] = {}
     market_candles: dict[str, pd.DataFrame] = {}
     active_strategies = get_active_strategies()
-    for token_id in tokens:
+    
+    # Limit scanning batch to prevent long blocking times on UI load
+    scan_tokens = tokens[:25] 
+
+    for token_id in scan_tokens:
         try:
             price_map[token_id] = get_price_usd(token_id)
             market_candles[token_id] = get_candles(token_id)
             stats["markets"] += 1
         except Exception:
             pass
+
     for token_id in list(state["positions"].keys()):
         try:
             price = price_map.get(token_id) or get_price_usd(token_id)
@@ -414,6 +421,7 @@ def auto_paper_cycle() -> dict[str, Any]:
                     stats["sells"] += 1
         except Exception:
             pass
+
     mutate_strategies()
     memory = load_json(MEMORY_FILE, {})
     strategy_scores = memory.get("strategy_scores", {})
@@ -441,6 +449,7 @@ def auto_paper_cycle() -> dict[str, Any]:
                 stats["buys"] += 1
         except Exception:
             pass
+
     state["last_cycle"] = utc_now()
     state["last_cycle_note"] = (
         f"Scanned {stats['markets']} USD spot tokens; {stats['buys']} buys, "
@@ -460,7 +469,15 @@ def render_dashboard() -> None:
             save_json(STATE_FILE, default_state())
             st.success("Account reset successfully!")
             st.rerun()
-    auto_paper_cycle()
+
+    # Run paper cycle inside a status container so users see progress instead of a blank screen
+    with st.status("Executing market scan...", expanded=False) as status:
+        try:
+            auto_paper_cycle()
+            status.update(label="Market scan complete!", state="complete", expanded=False)
+        except Exception as e:
+            status.update(label=f"Scan warning: {e}", state="error", expanded=False)
+
     state = load_state()
     prices: dict[str, float] = {}
     for token_id in list(state["positions"].keys()):
@@ -468,19 +485,23 @@ def render_dashboard() -> None:
             prices[token_id] = get_price_usd(token_id)
         except Exception:
             pass
+
     total_value, holdings_value = portfolio_value(state, prices)
     cash = float(state.get("cash_usd", 0.0))
     start = float(state.get("starting_cash_usd", STARTING_CASH_USD))
     pnl = total_value - start
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Total portfolio value", money(total_value), delta=money(pnl))
     c2.metric("Available cash", money(cash))
     c3.metric("Open risk-tiered holdings", money(holdings_value), f"{len(state['positions'])} positions")
+
     st.info(
         f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
         f"refresh every {CYCLE_SECONDS} seconds  •  "
         f"{state.get('last_cycle_note', 'Waiting for scan.')}"
     )
+
     st.subheader("Open Risk-Tiered Positions (Universal USD)")
     positions_rows = []
     for token_id, pos in state["positions"].items():
@@ -498,16 +519,19 @@ def render_dashboard() -> None:
             "Current ($)": round(price, 6),
             "Unrealised P/L ($)": round(unrealised, 2),
         })
+
     if positions_rows:
         st.dataframe(pd.DataFrame(positions_rows), use_container_width=True, hide_index=True)
     else:
         st.write("No open positions.")
+
     st.subheader("Recent paper trades")
     trades = state.get("trades", [])[:30]
     if trades:
         st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
     else:
         st.write("No paper trades recorded yet.")
+
     st.subheader("Active Strategy Evolution & Mutated Parameters")
     memory = load_json(MEMORY_FILE, {})
     
@@ -528,6 +552,7 @@ def render_dashboard() -> None:
             st.dataframe(strats_df, use_container_width=True, hide_index=True)
         else:
             st.info("No active strategies loaded.")
+
     st.caption("Educational paper-trading simulator. No real orders are sent.")
 
 def main() -> None:
