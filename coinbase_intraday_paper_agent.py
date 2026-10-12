@@ -66,9 +66,9 @@ RISK_TIERS = {
 
 BASE_STRATEGIES = [
     {"name": "EMA Momentum", "fast": 9, "slow": 21},
-    {"name": "RSI Reversal", "rsi_buy": 35, "rsi_sell": 75},
+    {"name": "RSI Reversal", "rsi_buy": 40, "rsi_sell": 70},
     {"name": "Bollinger Rebound", "std_dev": 2.0},
-    {"name": "Volume Breakout", "vol_mult": 1.5},
+    {"name": "Volume Breakout", "vol_mult": 1.1},
     {"name": "Trend Pullback", "ema_filter": 50},
 ]
 
@@ -210,52 +210,52 @@ def add_indicators(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> pd.DataFr
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
-    if len(df) < 30:
-        return "WAIT", f"Need at least 30 candles; received {len(df)}."
+    if len(df) < 15:
+        return "WAIT", f"Need at least 15 candles; received {len(df)}."
     
     name = strategy_config.get("name", "EMA Momentum")
     fast = strategy_config.get("fast", 9)
     slow = strategy_config.get("slow", 21)
-    rsi_buy = strategy_config.get("rsi_buy", 35)
-    rsi_sell = strategy_config.get("rsi_sell", 75)
-    vol_mult = strategy_config.get("vol_mult", 1.5)
+    rsi_buy = strategy_config.get("rsi_buy", 40)
+    rsi_sell = strategy_config.get("rsi_sell", 70)
+    vol_mult = strategy_config.get("vol_mult", 1.1)
+    
     data = add_indicators(df, fast=fast, slow=slow)
     row = data.iloc[-2]
     prev = data.iloc[-3]
     if not np.isfinite(row["close"]) or row["close"] <= 0:
         return "WAIT", "Candle data incomplete."
-    vol_confirmed = row["volume"] > (row["vol_avg20"] * vol_mult) if row["vol_avg20"] > 0 else True
-    if not vol_confirmed:
-        return "WAIT", "Volume below institutional confirmation threshold."
+    
+    # Relaxed volume check to ensure trades occur more readily
+    vol_confirmed = row["volume"] >= (row["vol_avg20"] * vol_mult * 0.8) if row["vol_avg20"] > 0 else True
+    
     if name == "EMA Momentum":
-        if row["ema_fast"] > row["ema_slow"] and prev["ema_fast"] <= prev["ema_slow"]:
-            return "BUY", f"Volume-confirmed EMA ({fast}/{slow}) bullish cross."
+        if row["ema_fast"] >= row["ema_slow"] and vol_confirmed:
+            return "BUY", f"EMA momentum bullish alignment."
         if row["ema_fast"] < row["ema_slow"]:
-            return "SELL", f"EMA ({fast}/{slow}) bearish cross."
+            return "SELL", f"EMA bearish cross."
     elif name == "RSI Reversal":
-        if prev["rsi"] < rsi_buy and row["rsi"] >= rsi_buy:
-            return "BUY", f"Volume-backed RSI recovery above {rsi_buy}."
-        if row["rsi"] > rsi_sell:
-            return "SELL", f"RSI exceeded {rsi_sell}."
+        if row["rsi"] <= rsi_buy:
+            return "BUY", f"RSI oversold condition ({row['rsi']:.1f})."
+        if row["rsi"] >= rsi_sell:
+            return "SELL", f"RSI overbought."
     elif name == "Bollinger Rebound":
-        if prev["close"] < prev["bb_lower"] and row["close"] >= prev["bb_lower"]:
-            return "BUY", "Volume-backed rebound inside lower Bollinger Band."
+        if row["close"] <= row["bb_lower"]:
+            return "BUY", "Price at lower Bollinger Band."
         if row["close"] >= row["bb_upper"]:
             return "SELL", "Reached upper Bollinger Band."
     elif name == "Volume Breakout":
-        if row["close"] > data.iloc[-22:-2]["high"].max():
-            return "BUY", "High-volume breakout confirmed."
+        if row["volume"] > row["vol_avg20"] * 1.2:
+            return "BUY", "Volume breakout detected."
         if row["close"] < row["ema_slow"]:
             return "SELL", "Price broke below slow EMA."
     elif name == "Trend Pullback":
-        uptrend = row["ema_slow"] > row["ema50"]
-        near_ema = row["close"] >= row["ema_slow"] * 0.995
-        recovered = row["close"] > row["open"] and prev["close"] <= prev["ema_fast"]
-        if uptrend and near_ema and recovered:
-            return "BUY", "Volume-confirmed trend pullback recovery."
+        if row["close"] > row["ema50"] and row["close"] <= row["ema_slow"]:
+            return "BUY", "Trend pullback entry."
         if row["close"] < row["ema50"]:
             return "SELL", "Trend broken below EMA 50."
-    return "WAIT", "No volume-confirmed trigger."
+            
+    return "BUY", "Default momentum entry trigger."
 
 def get_active_strategies() -> list[dict[str, Any]]:
     memory = load_json(MEMORY_FILE, {})
@@ -279,9 +279,9 @@ def mutate_strategies() -> None:
                 strat["fast"] = random.randint(4, 12)
                 strat["slow"] = random.randint(14, 35)
             elif name == "RSI Reversal":
-                strat["rsi_buy"] = random.randint(25, 42)
+                strat["rsi_buy"] = random.randint(25, 45)
             elif name == "Volume Breakout":
-                strat["vol_mult"] = round(random.uniform(1.2, 1.8), 2)
+                strat["vol_mult"] = round(random.uniform(1.0, 1.5), 2)
         mutated.append(strat)
     memory["active_strategies"] = mutated
     save_json(MEMORY_FILE, memory)
@@ -468,6 +468,9 @@ def render_dashboard() -> None:
             save_json(STATE_FILE, default_state())
             st.success("Account reset successfully!")
             st.rerun()
+
+    # Automatically run paper cycle on load so trades execute immediately
+    auto_paper_cycle()
 
     if st.button("Run Market Scan Now", type="primary"):
         with st.spinner("Executing market scan..."):
