@@ -2,7 +2,8 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-anti-churn protection, self-evolving genetic strategy pool, and non-blocking UI.
+anti-churn fee protection, genetic strategy evolution, and upgraded
+Technical Analysis signals (RSI Range Filter, ATR Dynamic Stops, Bollinger Squeezes).
 """
 from __future__ import annotations
 
@@ -60,7 +61,7 @@ RISK_TIERS = {
 }
 
 st.set_page_config(
-    page_title="Coinbase Self-Evolving Paper Trading Agent",
+    page_title="Coinbase Upgraded Genetic Paper Trading Agent",
     layout="wide",
 )
 
@@ -85,14 +86,27 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Non-blocking engine initialized."
+        st.session_state.last_cycle_note = "Upgraded TA genetic engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
+    # Genetic Pool upgraded with RSI, ATR, and Bollinger Band Squeeze parameters
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
-            {"name": "Alpha-V1 (Macro Momentum)", "fast": 8, "slow": 21, "vol_mult": 1.5, "pnl": 0.0, "trades_count": 0},
-            {"name": "Alpha-V2 (Volume Breakout)", "fast": 5, "slow": 15, "vol_mult": 1.75, "pnl": 0.0, "trades_count": 0},
+            {
+                "name": "Alpha-V1 (BB Squeeze + Vol Breakout)",
+                "fast": 8, "slow": 21, "vol_mult": 1.75,
+                "rsi_min": 45, "rsi_max": 68,
+                "bb_squeeze": True, "atr_multiplier": 2.5,
+                "pnl": 0.0, "trades_count": 0
+            },
+            {
+                "name": "Alpha-V2 (Dynamic ATR Volatility Momentum)",
+                "fast": 5, "slow": 15, "vol_mult": 1.50,
+                "rsi_min": 40, "rsi_max": 72,
+                "bb_squeeze": False, "atr_multiplier": 2.0,
+                "pnl": 0.0, "trades_count": 0
+            },
         ]
 
 def add_event(message: str, kind: str = "INFO") -> None:
@@ -170,40 +184,80 @@ def get_candles(token_id: str) -> pd.DataFrame:
         "volume": volumes
     })
 
-def add_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
+def add_advanced_indicators(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
     if df.empty or len(df) < slow:
         return df
     out = df.copy()
     close = out["close"]
+    high = out["high"]
+    low = out["low"]
+    
+    # EMAs
     out["ema_fast"] = close.ewm(span=fast, adjust=False).mean()
     out["ema_slow"] = close.ewm(span=slow, adjust=False).mean()
     out["vol_avg"] = out["volume"].rolling(14).mean().fillna(1.0)
+    
+    # 1. RSI Indicator
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / (loss.replace(0, 1e-6))
+    out["rsi"] = 100 - (100 / (1 + rs))
+    out["rsi"] = out["rsi"].fillna(50.0)
+    
+    # 2. Average True Range (ATR)
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    out["atr"] = tr.rolling(14).mean().fillna(close * 0.02)
+    
+    # 3. Bollinger Bands & Squeeze Ratio
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std().fillna(1e-4)
+    out["bb_upper"] = sma20 + (2.0 * std20)
+    out["bb_lower"] = sma20 - (2.0 * std20)
+    out["bb_width"] = (out["bb_upper"] - out["bb_lower"]) / (sma20.replace(0, 1.0))
+    out["bb_squeeze"] = out["bb_width"] <= out["bb_width"].rolling(20).min() * 1.15
+    
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str, float]:
     fast = int(strategy_config.get("fast", 8))
     slow = max(fast + 2, int(strategy_config.get("slow", 21)))
-    data = add_indicators(df, fast=fast, slow=slow)
-    if len(data) < 10:
-        return "WAIT", "Insufficient 4H data.", 0.0
+    data = add_advanced_indicators(df, fast=fast, slow=slow)
+    if len(data) < 20:
+        return "WAIT", "Insufficient 4H candle data.", 0.0
     row = data.iloc[-1]
     
     ema_fast = float(row["ema_fast"])
     ema_slow = float(row["ema_slow"])
     vol = float(row["volume"])
     vol_avg = float(row["vol_avg"])
+    rsi = float(row["rsi"])
+    is_squeezed = bool(row["bb_squeeze"])
     
     required_vol_mult = float(strategy_config.get("vol_mult", 1.75))
-    if ema_fast > ema_slow and vol >= (vol_avg * required_vol_mult):
-        strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
-        return "BUY", f"Evolved Breakout ({strategy_config['name']})", strength
+    rsi_min = float(strategy_config.get("rsi_min", 40))
+    rsi_max = float(strategy_config.get("rsi_max", 70))
+    req_squeeze = bool(strategy_config.get("bb_squeeze", False))
     
-    return "WAIT", "Waiting for volume expansion.", 0.0
+    # Filter Checks
+    ema_cross = ema_fast > ema_slow
+    vol_surge = vol >= (vol_avg * required_vol_mult)
+    rsi_in_range = rsi_min <= rsi <= rsi_max
+    squeeze_pass = (not req_squeeze) or is_squeezed
+    
+    if ema_cross and vol_surge and rsi_in_range and squeeze_pass:
+        strength = (ema_fast - ema_slow) / ema_slow + (vol / vol_avg - 1.0)
+        return "BUY", f"Upgraded Breakout Signal ({strategy_config['name']})", strength
+    
+    return "WAIT", "Waiting for TA confluence (EMA/Vol/RSI/BB).", 0.0
 
 def evolve_strategies_genetic() -> str:
     pool = st.session_state.strategies
     if len(pool) < 2:
-        return "Evolution pending more data."
+        return "Evolution pending more trade history."
     
     pool.sort(key=lambda x: x["pnl"], reverse=True)
     best_strat = pool[0]
@@ -211,19 +265,26 @@ def evolve_strategies_genetic() -> str:
     mutation_id = random.randint(100, 999)
     new_fast = max(3, int(best_strat["fast"] + random.choice([-2, -1, 1, 2])))
     new_slow = max(new_fast + 4, int(best_strat["slow"] + random.choice([-3, -1, 2, 4])))
-    new_vol = round(max(1.4, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.1, 0.0, 0.1]))), 2)
+    new_vol = round(max(1.3, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.1, 0.0, 0.1]))), 2)
+    new_rsi_min = max(35, min(50, int(best_strat.get("rsi_min", 40) + random.choice([-3, 0, 3]))))
+    new_rsi_max = max(65, min(80, int(best_strat.get("rsi_max", 70) + random.choice([-3, 0, 3]))))
+    new_atr_mult = round(max(1.5, min(4.0, float(best_strat.get("atr_multiplier", 2.5)) + random.choice([-0.2, 0.2]))), 1)
     
     mutated_strat = {
-        "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow}/V:{new_vol})",
+        "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow}/V:{new_vol}/RSI:{new_rsi_min}-{new_rsi_max})",
         "fast": new_fast,
         "slow": new_slow,
         "vol_mult": new_vol,
+        "rsi_min": new_rsi_min,
+        "rsi_max": new_rsi_max,
+        "bb_squeeze": random.choice([True, False]),
+        "atr_multiplier": new_atr_mult,
         "pnl": 0.0,
         "trades_count": 0
     }
     
     pool[-1] = mutated_strat
-    add_event(f"🧬 Genetic Evolution: Spawned mutated variant {mutated_strat['name']}.", "EVOLVE")
+    add_event(f"🧬 Genetic Evolution: Mutated elite parent into {mutated_strat['name']}.", "EVOLVE")
     return f"Evolved! Spawned {mutated_strat['name']}."
 
 def get_total_cost_basis() -> float:
@@ -244,7 +305,7 @@ def get_tier_current_invested(tier_name: str) -> float:
 def count_tier_positions(tier_name: str) -> int:
     return sum(1 for pos in st.session_state.positions.values() if pos.get("tier") == tier_name)
 
-def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
+def paper_buy(token_id: str, price: float, strategy_name: str, tier: str, atr_val: float = 0.0) -> bool:
     if token_id in st.session_state.positions:
         return False
         
@@ -270,8 +331,8 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
         return False
         
     st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
-    
     clean_price = float(price)
+    
     st.session_state.positions[token_id] = {
         "token_id": token_id,
         "strategy": strategy_name,
@@ -281,6 +342,7 @@ def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> boo
         "peak_price": clean_price,
         "quantity": float(quantity),
         "cost_usd": float(spend),
+        "atr": atr_val,
         "entry_time": utc_now(),
     }
     st.session_state.trades.insert(0, {
@@ -336,7 +398,6 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles = {}
     active_strategies = st.session_state.strategies
     
-    # Restrict batch size to 5 markets per cycle to ensure fast rendering
     scan_tokens = random.sample(tokens, min(len(tokens), 5))
     for token_id in scan_tokens:
         fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
@@ -358,7 +419,11 @@ def auto_paper_cycle() -> dict[str, Any]:
         
         peak = max(pos.get("peak_price", entry_p), price)
         pos["peak_price"] = peak
-        trailing_stop = peak * (1.0 - tier_cfg["trailing_distance"])
+        
+        # Upgraded ATR Volatility Stop
+        atr_val = float(pos.get("atr", entry_p * 0.02))
+        atr_stop_distance = max(tier_cfg["trailing_distance"], (atr_val * 2.5) / entry_p)
+        trailing_stop = peak * (1.0 - atr_stop_distance)
         
         if change <= tier_cfg["stop_loss"]:
             if paper_sell(token_id, price, "Stop-loss triggered."):
@@ -367,7 +432,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             if paper_sell(token_id, price, "Take-profit target reached."):
                 stats["sells"] += 1
         elif price <= trailing_stop and peak > entry_p:
-            if paper_sell(token_id, price, "Trailing profit secured."):
+            if paper_sell(token_id, price, "ATR Dynamic Trailing stop triggered."):
                 stats["sells"] += 1
 
     candidates_map = {}
@@ -410,11 +475,13 @@ def auto_paper_cycle() -> dict[str, Any]:
                         stats["sells"] += 1
                         stats["rotations"] += 1
 
-        if paper_buy(token_id, price_map.get(token_id, get_price_usd(token_id)), strat_name, tier):
+        df_cand = market_candles.get(token_id, pd.DataFrame())
+        atr_calc = float(df_cand["close"].iloc[-1] * 0.02) if not df_cand.empty else 0.0
+        if paper_buy(token_id, price_map.get(token_id, get_price_usd(token_id)), strat_name, tier, atr_val=atr_calc):
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Non-blocking Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Upgraded TA Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -423,7 +490,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Fast Render Engine • Anti-Churn Protection • Genetic Optimization")
+    st.caption("Upgraded Technical Indicators • RSI Range Filters • ATR Trailing Stops • BB Squeeze Filters")
     
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -462,7 +529,7 @@ def render_live_dashboard() -> None:
 
     st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
 
-    st.subheader("Evolving Strategies Pool (Genetic Pool)")
+    st.subheader("Evolving Strategies Pool (Upgraded TA Genetic Engine)")
     strat_rows = []
     for s in st.session_state.strategies:
         strat_rows.append({
@@ -470,6 +537,9 @@ def render_live_dashboard() -> None:
             "Fast EMA": s["fast"],
             "Slow EMA": s["slow"],
             "Min Volume Mult": s["vol_mult"],
+            "RSI Range": f"{s.get('rsi_min', 40)} - {s.get('rsi_max', 70)}",
+            "BB Squeeze Req": s.get("bb_squeeze", False),
+            "ATR Mult": s.get("atr_multiplier", 2.5),
             "Closed Trades": s["trades_count"],
             "Attributed P/L ($)": round(s["pnl"], 2)
         })
@@ -506,7 +576,7 @@ def render_live_dashboard() -> None:
         styled_df = df_pos.style.map(color_pnl, subset=["Unrealised P/L ($)"]) if hasattr(df_pos.style, "map") else df_pos.style.applymap(color_pnl, subset=["Unrealised P/L ($)"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
-        st.write("Evolving strategies scanning Coinbase markets for breakouts...")
+        st.write("Evolving strategies scanning Coinbase markets for upgraded TA setups...")
 
     st.subheader("Recent Executed Trades")
     trades = st.session_state.trades[:20]
@@ -516,8 +586,4 @@ def render_live_dashboard() -> None:
         st.write("No trades executed yet.")
 
 def main() -> None:
-    init_session_state()
-    render_live_dashboard()
-
-if __name__ == "__main__":
-    main()
+    init_
