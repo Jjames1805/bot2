@@ -2,16 +2,14 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Scans online USD-quoted spot tokens with
-fixed $10 position sizing and resilient live execution loops.
+in-memory session state accounting for 100% accurate math.
 """
 from __future__ import annotations
 
-import json
 import math
 import random
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,9 +17,6 @@ import pandas as pd
 import requests
 import streamlit as st
 
-APP_DIR = Path(__file__).resolve().parent
-STATE_FILE = APP_DIR / "paper_state_usd.json"
-MEMORY_FILE = APP_DIR / "strategy_memory_usd.json"
 BASE_URL = "https://api.exchange.coinbase.com"
 STARTING_CASH_USD = 100.0
 FEE_RATE = 0.001
@@ -74,53 +69,29 @@ def utc_now() -> str:
 def money(value: float) -> str:
     return f"${float(value):,.2f}"
 
-def default_state() -> dict[str, Any]:
-    return {
-        "cash_usd": STARTING_CASH_USD,
-        "starting_cash_usd": STARTING_CASH_USD,
-        "positions": {},
-        "trades": [],
-        "events": [],
-        "last_cycle": None,
-        "last_cycle_note": "Clean state initialized.",
-        "total_fees_usd": 0.0,
-        "state_version": 13,
-    }
+def init_session_state() -> None:
+    if "cash_usd" not in st.session_state:
+        st.session_state.cash_usd = STARTING_CASH_USD
+    if "starting_cash_usd" not in st.session_state:
+        st.session_state.starting_cash_usd = STARTING_CASH_USD
+    if "positions" not in st.session_state:
+        st.session_state.positions = {}
+    if "trades" not in st.session_state:
+        st.session_state.trades = []
+    if "events" not in st.session_state:
+        st.session_state.events = []
+    if "last_cycle" not in st.session_state:
+        st.session_state.last_cycle = None
+    if "last_cycle_note" not in st.session_state:
+        st.session_state.last_cycle_note = "In-memory session initialized."
+    if "total_fees_usd" not in st.session_state:
+        st.session_state.total_fees_usd = 0.0
 
-def load_json(path: Path, default: Any) -> Any:
-    try:
-        if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return default
-
-def save_json(path: Path, value: Any) -> None:
-    try:
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(value, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        st.error(f"Failed to save state: {e}")
-
-def load_state() -> dict[str, Any]:
-    state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 13:
-        state = default_state()
-        save_json(STATE_FILE, state)
-    defaults = default_state()
-    for key, value in defaults.items():
-        state.setdefault(key, value)
-    state.setdefault("positions", {})
-    state.setdefault("trades", [])
-    state.setdefault("events", [])
-    return state
-
-def add_event(state: dict[str, Any], message: str, kind: str = "INFO") -> None:
-    state.setdefault("events", []).insert(
+def add_event(message: str, kind: str = "INFO") -> None:
+    st.session_state.events.insert(
         0, {"time": utc_now(), "type": kind, "message": str(message)[:500]}
     )
-    state["events"] = state["events"][:250]
+    st.session_state.events = st.session_state.events[:250]
 
 def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     response = requests.get(
@@ -212,8 +183,8 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     
     return "WAIT", "Waiting for high-conviction setup."
 
-def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
-    cash = float(state["cash_usd"])
+def paper_buy(token_id: str, price: float, strategy_name: str, tier: str) -> bool:
+    cash = float(st.session_state.cash_usd)
     if cash < POSITION_SIZE_USD:
         return False
     
@@ -223,11 +194,11 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
     if quantity <= 0:
         return False
         
-    state["cash_usd"] = cash - spend
-    state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
+    st.session_state.cash_usd = cash - spend
+    st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
     
     clean_price = float(price)
-    state["positions"][token_id] = {
+    st.session_state.positions[token_id] = {
         "token_id": token_id,
         "strategy": strategy_name,
         "tier": tier,
@@ -238,16 +209,16 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
         "cost_usd": float(spend),
         "entry_time": utc_now(),
     }
-    state["trades"].insert(0, {
+    st.session_state.trades.insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "token": token_id,
         "price_usd": clean_price, "quantity": float(quantity), "value_usd": float(spend),
         "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
-    add_event(state, f"PAPER BUY [{tier}] {token_id} at {money(clean_price)}.", "BUY")
+    add_event(f"PAPER BUY [{tier}] {token_id} at {money(clean_price)}.", "BUY")
     return True
 
-def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) -> bool:
-    pos = state["positions"].get(token_id)
+def paper_sell(token_id: str, price: float, reason: str) -> bool:
+    pos = st.session_state.positions.get(token_id)
     if not pos:
         return False
     qty = float(pos["quantity"])
@@ -256,22 +227,21 @@ def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) 
     proceeds = gross - fee
     pnl = proceeds - float(pos["cost_usd"])
     
-    state["cash_usd"] = float(state["cash_usd"]) + float(pos["cost_usd"]) + pnl
-    state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
+    st.session_state.cash_usd = float(st.session_state.cash_usd) + float(pos["cost_usd"]) + pnl
+    st.session_state.total_fees_usd = float(st.session_state.total_fees_usd) + fee
     
     tier = pos.get("tier", "Medium Risk")
-    state["trades"].insert(0, {
+    st.session_state.trades.insert(0, {
         "time": utc_now(), "side": "PAPER SELL", "token": token_id,
         "price_usd": float(price), "quantity": float(qty), "value_usd": float(proceeds),
         "fee_usd": float(fee), "strategy": pos.get("strategy", ""), "tier": tier, "pnl_usd": float(pnl),
         "reason": reason,
     })
-    add_event(state, f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
-    del state["positions"][token_id]
+    add_event(f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
+    del st.session_state.positions[token_id]
     return True
 
 def auto_paper_cycle() -> dict[str, Any]:
-    state = load_state()
     stats = {"markets": 0, "buys": 0, "sells": 0}
     tokens = get_all_supported_tokens()
     
@@ -281,13 +251,13 @@ def auto_paper_cycle() -> dict[str, Any]:
     
     scan_tokens = random.sample(tokens, min(len(tokens), 15))
     for token_id in scan_tokens:
-        fallback = state["positions"].get(token_id, {}).get("entry_price")
+        fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
-    for token_id in list(state["positions"].keys()):
-        pos = state["positions"][token_id]
+    for token_id in list(st.session_state.positions.keys()):
+        pos = st.session_state.positions[token_id]
         fallback = pos.get("entry_price")
         price = price_map.get(token_id) or get_price_usd(token_id, fallback_price=fallback)
         price_map[token_id] = price
@@ -303,18 +273,18 @@ def auto_paper_cycle() -> dict[str, Any]:
         trailing_stop = peak * (1.0 - tier_cfg["trailing_distance"])
         
         if change <= tier_cfg["stop_loss"]:
-            if paper_sell(state, token_id, price, "Stop-loss triggered."):
+            if paper_sell(token_id, price, "Stop-loss triggered."):
                 stats["sells"] += 1
         elif change >= tier_cfg["take_profit"]:
-            if paper_sell(state, token_id, price, "Take-profit target reached."):
+            if paper_sell(token_id, price, "Take-profit target reached."):
                 stats["sells"] += 1
         elif price <= trailing_stop and peak > entry_p:
-            if paper_sell(state, token_id, price, "Trailing profit secured."):
+            if paper_sell(token_id, price, "Trailing profit secured."):
                 stats["sells"] += 1
 
     candidates = []
     for token_id, df in market_candles.items():
-        if token_id in state["positions"]:
+        if token_id in st.session_state.positions:
             continue
         for strat in active_strategies:
             action, _ = adaptive_strategy_signal(df, strat)
@@ -324,58 +294,58 @@ def auto_paper_cycle() -> dict[str, Any]:
 
     random.shuffle(candidates)
     for token_id, strat_name, tier in candidates:
-        if len(state["positions"]) >= MAX_OPEN_POSITIONS:
+        if len(st.session_state.positions) >= MAX_OPEN_POSITIONS:
             break
-        if float(state["cash_usd"]) < POSITION_SIZE_USD:
+        if float(st.session_state.cash_usd) < POSITION_SIZE_USD:
             break
-        fallback = state["positions"].get(token_id, {}).get("entry_price")
+        fallback = st.session_state.positions.get(token_id, {}).get("entry_price")
         price = price_map.get(token_id, get_price_usd(token_id, fallback_price=fallback))
-        if paper_buy(state, token_id, price, strat_name, tier):
+        if paper_buy(token_id, price, strat_name, tier):
             stats["buys"] += 1
 
-    state["last_cycle"] = utc_now()
-    state["last_cycle_note"] = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells."
-    state["trades"] = state["trades"][:500]
-    save_json(STATE_FILE, state)
+    st.session_state.last_cycle = utc_now()
+    st.session_state.last_cycle_note = f"Active cycle: {stats['buys']} buys, {stats['sells']} sells."
+    st.session_state.trades = st.session_state.trades[:500]
     return stats
 
 @st.fragment(run_every=CYCLE_SECONDS)
 def render_live_dashboard() -> None:
+    init_session_state()
+    
     st.title("Coinbase Paper Trading Agent (Universal USD Spot Mode)")
-    st.caption("Active Paper Trading Simulator • Live Fragment Polling Enabled")
+    st.caption("Active Paper Trading Simulator • In-Memory Session Accounting")
     
     col1, col2 = st.columns([3, 1])
     with col2:
         if st.button("Reset Account & Clear Positions", type="primary", use_container_width=True):
-            if STATE_FILE.exists():
-                STATE_FILE.unlink()
+            st.session_state.clear()
+            init_session_state()
             st.success("Account reset successfully!")
             st.rerun()
 
     auto_paper_cycle()
-    state = load_state()
     
     prices = {}
-    for tid, pos in state["positions"].items():
+    for tid, pos in st.session_state.positions.items():
         fallback = pos.get("entry_price")
         prices[tid] = get_price_usd(tid, fallback_price=fallback)
         pos["last_price"] = prices[tid]
         
     holdings_val = 0.0
-    for tid, pos in state["positions"].items():
+    for tid, pos in st.session_state.positions.items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
         holdings_val += float(pos.get("quantity", 0.0)) * curr_p
 
-    cash = float(state.get("cash_usd", STARTING_CASH_USD))
+    cash = float(st.session_state.cash_usd)
     total_val = cash + holdings_val
     pnl = total_val - STARTING_CASH_USD
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Portfolio Value", money(total_val), delta=money(pnl))
     c2.metric("Available Cash", money(cash))
-    c3.metric("Open Positions", f"{len(state['positions'])} / {MAX_OPEN_POSITIONS}")
+    c3.metric("Open Positions", f"{len(st.session_state.positions)} / {MAX_OPEN_POSITIONS}")
 
-    st.info(f"Last Cycle: {state.get('last_cycle')} UTC — {state.get('last_cycle_note')}")
+    st.info(f"Last Cycle: {st.session_state.last_cycle} UTC — {st.session_state.last_cycle_note}")
 
     st.subheader("Portfolio Ledger Breakdown")
     ledger_df = pd.DataFrame([
@@ -389,7 +359,7 @@ def render_live_dashboard() -> None:
 
     st.subheader("Active Positions")
     rows = []
-    for tid, pos in state["positions"].items():
+    for tid, pos in st.session_state.positions.items():
         curr_p = prices.get(tid, pos.get("entry_price", 1.0))
         entry_p = float(pos.get("entry_price", curr_p))
         val = float(pos["quantity"]) * curr_p
@@ -410,13 +380,14 @@ def render_live_dashboard() -> None:
         st.write("Scanning for next high-conviction trade opportunity...")
 
     st.subheader("Recent Executed Trades")
-    trades = state.get("trades", [])[:20]
+    trades = st.session_state.trades[:20]
     if trades:
         st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
     else:
         st.write("No trades executed yet.")
 
 def main() -> None:
+    init_session_state()
     render_live_dashboard()
 
 if __name__ == "__main__":
