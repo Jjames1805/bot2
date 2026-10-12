@@ -37,29 +37,29 @@ RISK_TIERS = {
         "allocation_fraction": 0.25,
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "stop_loss": -0.05,
-        "take_profit": 0.02,
-        "trailing_distance": 0.01,
+        "take_profit": 0.03,
+        "trailing_distance": 0.015,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
         "stop_loss": -0.06,
-        "take_profit": 0.025,
-        "trailing_distance": 0.015,
+        "take_profit": 0.04,
+        "trailing_distance": 0.02,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
         "stop_loss": -0.08,
-        "take_profit": 0.03,
-        "trailing_distance": 0.02,
+        "take_profit": 0.05,
+        "trailing_distance": 0.025,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
         "stop_loss": -0.10,
-        "take_profit": 0.04,
-        "trailing_distance": 0.025,
+        "take_profit": 0.06,
+        "trailing_distance": 0.03,
     },
 }
 
@@ -91,7 +91,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 3,
+        "state_version": 4,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -112,7 +112,7 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 3:
+    if not isinstance(state, dict) or state.get("state_version", 1) < 4:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -159,7 +159,7 @@ def classify_token_tier(token_id: str) -> str:
             return tier_name
     return "Medium Risk"
 
-def get_price_usd(token_id: str) -> float:
+def get_price_usd(token_id: str, fallback_price: float | None = None) -> float:
     try:
         ticker = api_get(f"/products/{token_id}/ticker")
         price = float(ticker.get("price", 0))
@@ -168,13 +168,11 @@ def get_price_usd(token_id: str) -> float:
     except Exception:
         pass
     
-    base_defaults = {
-        "BTC-USD": 91000.0, "ETH-USD": 3400.0, "SOL-USD": 190.0,
-        "XRP-USD": 1.40, "ADA-USD": 0.85, "LTC-USD": 105.0,
-        "DOGE-USD": 0.22, "AVAX-USD": 32.0, "DOT-USD": 6.50
-    }
-    base = base_defaults.get(token_id, 10.0)
-    return base * (1.0 + random.uniform(-0.01, 0.01))
+    # Safely fallback to last known position price or entry price if API rate-limits
+    if fallback_price is not None and fallback_price > 0:
+        return fallback_price
+        
+    return 1.0
 
 def get_candles(token_id: str) -> pd.DataFrame:
     try:
@@ -317,15 +315,16 @@ def auto_paper_cycle() -> dict[str, Any]:
     
     scan_tokens = random.sample(tokens, min(len(tokens), 10))
     for token_id in scan_tokens:
-        price_map[token_id] = get_price_usd(token_id)
+        fallback = state["positions"].get(token_id, {}).get("last_price")
+        price_map[token_id] = get_price_usd(token_id, fallback_price=fallback)
         market_candles[token_id] = get_candles(token_id)
         stats["markets"] += 1
 
-    # Guaranteed turnover: increment cycle age and force sell positions after 2 cycles
     for token_id in list(state["positions"].keys()):
-        price = price_map.get(token_id) or get_price_usd(token_id)
-        price_map[token_id] = price
         pos = state["positions"][token_id]
+        fallback = pos.get("last_price", pos["entry_price"])
+        price = price_map.get(token_id) or get_price_usd(token_id, fallback_price=fallback)
+        price_map[token_id] = price
         pos["last_price"] = price
         pos["cycles_held"] = pos.get("cycles_held", 0) + 1
         
@@ -333,7 +332,6 @@ def auto_paper_cycle() -> dict[str, Any]:
         tier_cfg = RISK_TIERS[tier]
         change = price / float(pos["entry_price"]) - 1
         
-        # Sell if take-profit, stop-loss, or forced rotation after 2 cycles
         if change <= tier_cfg["stop_loss"] or change >= tier_cfg["take_profit"] or pos["cycles_held"] >= 2:
             if paper_sell(state, token_id, price, "Cycle rotation / Target reached."):
                 stats["sells"] += 1
@@ -352,7 +350,8 @@ def auto_paper_cycle() -> dict[str, Any]:
     for token_id, strat_name, tier in candidates:
         if len(state["positions"]) >= MAX_OPEN_POSITIONS:
             break
-        price = price_map.get(token_id, get_price_usd(token_id))
+        fallback = state["positions"].get(token_id, {}).get("last_price")
+        price = price_map.get(token_id, get_price_usd(token_id, fallback_price=fallback))
         if paper_buy(state, token_id, price, strat_name, tier):
             stats["buys"] += 1
 
@@ -378,8 +377,10 @@ def render_dashboard() -> None:
     state = load_state()
     
     prices = {}
-    for tid in state["positions"]:
-        prices[tid] = get_price_usd(tid)
+    for tid, pos in state["positions"].items():
+        fallback = pos.get("last_price", pos["entry_price"])
+        prices[tid] = get_price_usd(tid, fallback_price=fallback)
+        pos["last_price"] = prices[tid]
         
     total_val, holdings_val = portfolio_value(state, prices)
     cash = float(state.get("cash_usd", STARTING_CASH_USD))
