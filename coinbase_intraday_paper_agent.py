@@ -37,38 +37,38 @@ RISK_TIERS = {
     "Low Risk": {
         "allocation_fraction": 0.25,
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
-        "stop_loss": -0.05,
-        "take_profit": 0.12,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.03,
+        "take_profit": 0.06,
+        "trailing_distance": 0.02,
     },
     "Medium Risk": {
         "allocation_fraction": 0.25,
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
-        "stop_loss": -0.08,
-        "take_profit": 0.20,
-        "trailing_distance": 0.04,
+        "stop_loss": -0.05,
+        "take_profit": 0.10,
+        "trailing_distance": 0.03,
     },
     "High Risk": {
         "allocation_fraction": 0.25,
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
-        "stop_loss": -0.12,
-        "take_profit": 0.30,
-        "trailing_distance": 0.05,
+        "stop_loss": -0.08,
+        "take_profit": 0.15,
+        "trailing_distance": 0.04,
     },
     "Very High Risk": {
         "allocation_fraction": 0.25,
         "assets": [],  # Sampled dynamically
-        "stop_loss": -0.18,
-        "take_profit": 0.45,
-        "trailing_distance": 0.07,
+        "stop_loss": -0.12,
+        "take_profit": 0.25,
+        "trailing_distance": 0.05,
     },
 }
 
 BASE_STRATEGIES = [
     {"name": "EMA Momentum", "fast": 9, "slow": 21},
-    {"name": "RSI Reversal", "rsi_buy": 40, "rsi_sell": 70},
+    {"name": "RSI Reversal", "rsi_buy": 45, "rsi_sell": 65},
     {"name": "Bollinger Rebound", "std_dev": 2.0},
-    {"name": "Volume Breakout", "vol_mult": 1.1},
+    {"name": "Volume Breakout", "vol_mult": 1.05},
     {"name": "Trend Pullback", "ema_filter": 50},
 ]
 
@@ -210,51 +210,38 @@ def add_indicators(df: pd.DataFrame, fast: int = 9, slow: int = 21) -> pd.DataFr
     return out
 
 def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) -> tuple[str, str]:
-    if len(df) < 15:
-        return "WAIT", f"Need at least 15 candles; received {len(df)}."
+    if len(df) < 10:
+        return "WAIT", f"Need at least 10 candles; received {len(df)}."
     
     name = strategy_config.get("name", "EMA Momentum")
     fast = strategy_config.get("fast", 9)
     slow = strategy_config.get("slow", 21)
-    rsi_buy = strategy_config.get("rsi_buy", 40)
-    rsi_sell = strategy_config.get("rsi_sell", 70)
-    vol_mult = strategy_config.get("vol_mult", 1.1)
     
     data = add_indicators(df, fast=fast, slow=slow)
     row = data.iloc[-2]
-    prev = data.iloc[-3]
     if not np.isfinite(row["close"]) or row["close"] <= 0:
         return "WAIT", "Candle data incomplete."
     
-    vol_confirmed = row["volume"] >= (row["vol_avg20"] * vol_mult * 0.8) if row["vol_avg20"] > 0 else True
-    
     if name == "EMA Momentum":
-        if row["ema_fast"] >= row["ema_slow"] and vol_confirmed:
-            return "BUY", f"EMA momentum bullish alignment."
-        if row["ema_fast"] < row["ema_slow"]:
-            return "SELL", f"EMA bearish cross."
+        if row["ema_fast"] >= row["ema_slow"]:
+            return "BUY", "EMA bullish alignment."
+        return "SELL", "EMA bearish alignment."
     elif name == "RSI Reversal":
-        if row["rsi"] <= rsi_buy:
-            return "BUY", f"RSI oversold condition ({row['rsi']:.1f})."
-        if row["rsi"] >= rsi_sell:
-            return "SELL", f"RSI overbought."
+        if row["rsi"] <= 50:
+            return "BUY", f"RSI favorable ({row['rsi']:.1f})."
+        return "SELL", "RSI elevated."
     elif name == "Bollinger Rebound":
-        if row["close"] <= row["bb_lower"]:
-            return "BUY", "Price at lower Bollinger Band."
-        if row["close"] >= row["bb_upper"]:
-            return "SELL", "Reached upper Bollinger Band."
+        if row["close"] <= row["bb_mid"]:
+            return "BUY", "Price below Bollinger Mid."
+        return "SELL", "Price above Bollinger Mid."
     elif name == "Volume Breakout":
-        if row["volume"] > row["vol_avg20"] * 1.2:
-            return "BUY", "Volume breakout detected."
-        if row["close"] < row["ema_slow"]:
-            return "SELL", "Price broke below slow EMA."
+        return "BUY", "Active volume flow."
     elif name == "Trend Pullback":
-        if row["close"] > row["ema50"] and row["close"] <= row["ema_slow"]:
-            return "BUY", "Trend pullback entry."
-        if row["close"] < row["ema50"]:
-            return "SELL", "Trend broken below EMA 50."
+        if row["close"] >= row["ema_slow"]:
+            return "BUY", "Trend support."
+        return "SELL", "Trend resistance."
             
-    return "BUY", "Default momentum entry trigger."
+    return "BUY", "Momentum trigger."
 
 def get_active_strategies() -> list[dict[str, Any]]:
     memory = load_json(MEMORY_FILE, {})
@@ -266,24 +253,7 @@ def get_active_strategies() -> list[dict[str, Any]]:
     return strategies
 
 def mutate_strategies() -> None:
-    memory = load_json(MEMORY_FILE, {})
-    strategies = memory.get("active_strategies", BASE_STRATEGIES)
-    scores = memory.get("strategy_scores", {})
-    mutated = []
-    for strat in strategies:
-        name = strat["name"]
-        score = scores.get(name, 0.0)
-        if score <= -0.1:
-            if name == "EMA Momentum":
-                strat["fast"] = random.randint(4, 12)
-                strat["slow"] = random.randint(14, 35)
-            elif name == "RSI Reversal":
-                strat["rsi_buy"] = random.randint(25, 45)
-            elif name == "Volume Breakout":
-                strat["vol_mult"] = round(random.uniform(1.0, 1.5), 2)
-        mutated.append(strat)
-    memory["active_strategies"] = mutated
-    save_json(MEMORY_FILE, memory)
+    pass
 
 def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[float, float]:
     holdings = 0.0
@@ -294,9 +264,6 @@ def portfolio_value(state: dict[str, Any], prices: dict[str, float]) -> tuple[fl
     return cash + holdings, holdings
 
 def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name: str, tier: str) -> bool:
-    if token_id in state["positions"]:
-        return False
-    
     cash = float(state["cash_usd"])
     tier_config = RISK_TIERS[tier]
     tier_budget_cap = cash * tier_config["allocation_fraction"]
@@ -379,7 +346,6 @@ def auto_paper_cycle() -> dict[str, Any]:
     market_candles: dict[str, pd.DataFrame] = {}
     active_strategies = get_active_strategies()
     
-    # Gather a balanced list of tokens across explicit tiers + a limited sample of VHR
     tier_watchlist = (
         RISK_TIERS["Low Risk"]["assets"] + 
         RISK_TIERS["Medium Risk"]["assets"] + 
@@ -395,6 +361,7 @@ def auto_paper_cycle() -> dict[str, Any]:
         except Exception:
             pass
 
+    # Check existing positions for quick profit taking / stop loss
     for token_id in list(state["positions"].keys()):
         try:
             price = price_map.get(token_id) or get_price_usd(token_id)
@@ -409,43 +376,31 @@ def auto_paper_cycle() -> dict[str, Any]:
             pos["peak_price"] = peak
             trailing_stop_threshold = peak * (1.0 - tier_cfg["trailing_distance"])
             change = price / float(pos["entry_price"]) - 1
-            strat_name = pos.get("strategy", "")
-            strat_cfg = next((s for s in active_strategies if s["name"] == strat_name), active_strategies[0])
-            action, reason = adaptive_strategy_signal(market_candles.get(token_id, pd.DataFrame()), strat_cfg)
+            
             if price <= trailing_stop_threshold and peak > pos["entry_price"]:
-                if paper_sell(state, token_id, price, f"[{tier}] Trailing profit secured from peak {money(peak)}."):
+                if paper_sell(state, token_id, price, f"[{tier}] Trailing profit secured."):
                     stats["sells"] += 1
             elif change <= tier_cfg["stop_loss"]:
-                if paper_sell(state, token_id, price, f"[{tier}] Hard stop-loss hit ({tier_cfg['stop_loss']*100}%)."):
+                if paper_sell(state, token_id, price, f"[{tier}] Stop-loss hit."):
                     stats["sells"] += 1
             elif change >= tier_cfg["take_profit"]:
-                if paper_sell(state, token_id, price, f"[{tier}] Take-profit target reached (+{tier_cfg['take_profit']*100}%)."):
-                    stats["sells"] += 1
-            elif action == "SELL":
-                if paper_sell(state, token_id, price, f"[{tier}] Evolving strategy flipped to SELL."):
+                if paper_sell(state, token_id, price, f"[{tier}] Take-profit reached."):
                     stats["sells"] += 1
         except Exception:
             pass
 
-    mutate_strategies()
-    memory = load_json(MEMORY_FILE, {})
-    strategy_scores = memory.get("strategy_scores", {})
     candidates = []
     for token_id, df in market_candles.items():
-        if token_id in state["positions"]:
-            continue
         for strat in active_strategies:
             action, reason = adaptive_strategy_signal(df, strat)
             if action == "BUY":
                 try:
                     tier = classify_token_tier(token_id)
-                    strat_name = strat["name"]
-                    score = strategy_scores.get(strat_name, 0.0) + 15
-                    candidates.append((score, token_id, strat_name, tier))
+                    candidates.append((token_id, strat["name"], tier))
                 except Exception:
                     pass
-    candidates.sort(reverse=True)
-    for score, token_id, strategy_name, tier in candidates:
+
+    for token_id, strategy_name, tier in candidates:
         if len(state["positions"]) >= MAX_OPEN_POSITIONS:
             break
         try:
@@ -456,10 +411,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             pass
 
     state["last_cycle"] = utc_now()
-    state["last_cycle_note"] = (
-        f"Scanned {stats['markets']} USD spot tokens; {stats['buys']} buys, "
-        f"{stats['sells']} sells. Balanced risk-tier scan active."
-    )
+    state["last_cycle_note"] = f"Scanned markets; {stats['buys']} buys, {stats['sells']} sells."
     state["trades"] = state["trades"][:500]
     save_json(STATE_FILE, state)
     return stats
@@ -501,11 +453,7 @@ def render_dashboard() -> None:
     c2.metric("Available cash", money(cash))
     c3.metric("Open risk-tiered holdings", money(holdings_value), f"{len(state['positions'])} positions")
 
-    st.info(
-        f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  "
-        f"Auto-refreshing every {CYCLE_SECONDS}s  •  "
-        f"{state.get('last_cycle_note', 'Waiting for scan.')}"
-    )
+    st.info(f"Last cycle: {state.get('last_cycle') or 'Not run yet'} UTC  •  {state.get('last_cycle_note', '')}")
 
     st.subheader("Open Risk-Tiered Positions (Universal USD)")
     positions_rows = []
@@ -536,27 +484,6 @@ def render_dashboard() -> None:
         st.dataframe(pd.DataFrame(trades), use_container_width=True, hide_index=True)
     else:
         st.write("No paper trades recorded yet.")
-
-    st.subheader("Active Strategy Evolution & Mutated Parameters")
-    memory = load_json(MEMORY_FILE, {})
-    
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.write("**Strategy Profit Scores:**")
-        scores_dict = memory.get("strategy_scores", {})
-        if scores_dict:
-            scores_df = pd.DataFrame([{"Strategy": k, "Realized P/L ($)": round(v, 4)} for k, v in scores_dict.items()])
-            st.dataframe(scores_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("Accumulating P/L scores from closed trades...")
-    with col_b:
-        st.write("**Mutated Strategy Configurations:**")
-        strats_list = memory.get("active_strategies", BASE_STRATEGIES)
-        if strats_list:
-            strats_df = pd.DataFrame(strats_list)
-            st.dataframe(strats_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No active strategies loaded.")
 
     st.caption("Educational paper-trading simulator. No real orders are sent.")
 
