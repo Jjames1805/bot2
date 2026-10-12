@@ -1,6 +1,6 @@
 """
-Coinbase intraday paper-trading agent (Robust Auto-Refreshing Mode)
---------------------------------------------------------------------
+Coinbase intraday paper-trading agent (Live Auto-Refreshing Mode)
+-----------------------------------------------------------------
 Paper trading only. This app uses public Coinbase Exchange market data and never
 submits real orders. It scans markets and simulates buys/sells automatically.
 """
@@ -27,7 +27,6 @@ STARTING_CASH_GBP = 100.0
 FEE_RATE = 0.006  # conservative simulated fee estimate per side
 CYCLE_SECONDS = 30
 CANDLE_GRANULARITY = 300  # 5-minute candles
-CANDLE_CACHE_SECONDS = 30
 MAX_OPEN_POSITIONS = 20
 MIN_POSITION_GBP = 2.0
 MAX_POSITION_FRACTION = 0.75  # High risk: up to 75% of available cash per trade
@@ -116,7 +115,6 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return response.json()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def get_gbp_products() -> list[str]:
     try:
         products = api_get("/products")
@@ -134,12 +132,10 @@ def get_gbp_products() -> list[str]:
         return ["BTC-GBP", "ETH-GBP", "SOL-GBP", "XRP-GBP"]
 
 
-@st.cache_data(ttl=5, show_spinner=False)
 def get_ticker(product_id: str) -> dict[str, Any]:
     return api_get(f"/products/{product_id}/ticker")
 
 
-@st.cache_data(ttl=CANDLE_CACHE_SECONDS, show_spinner=False)
 def get_candles(product_id: str, granularity: int = CANDLE_GRANULARITY) -> pd.DataFrame:
     try:
         raw = api_get(
@@ -413,7 +409,6 @@ def render_dashboard() -> None:
     st.title("Coinbase Paper Trading Agent (High-Risk Mode)")
     st.caption("Paper trading only • Public Coinbase Exchange data • No real orders are sent")
     
-    # Run trading cycle on load
     auto_paper_cycle(DEFAULT_MARKET_LIMIT)
 
     state = load_state()
@@ -517,7 +512,6 @@ def render_dashboard() -> None:
 def main() -> None:
     render_dashboard()
     
-    # Sleep and rerun for robust automatic cloud refreshing
     time.sleep(CYCLE_SECONDS)
     st.rerun()
 
