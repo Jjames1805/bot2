@@ -2,8 +2,7 @@
 Coinbase intraday paper-trading agent (Universal USD Spot Token Mode)
 ---------------------------------------------------------------------
 Paper trading only. Multi-tier risk allocation with 4-hour timeframes,
-1.75x volume filters, self-evolving genetic strategy optimization, 
-strict deduplication, and pristine bankroll accounting.
+anti-churn fee protection, genetic strategy evolution, and pristine accounting.
 """
 from __future__ import annotations
 
@@ -30,33 +29,33 @@ RISK_TIERS = {
         "assets": ["BTC-USD", "ETH-USD", "LTC-USD", "BCH-USD"],
         "capital_fraction": 0.20,
         "max_positions": 3,
-        "stop_loss": -0.04,
-        "take_profit": 0.08,
-        "trailing_distance": 0.02,
+        "stop_loss": -0.05,
+        "take_profit": 0.10,
+        "trailing_distance": 0.03,
     },
     "Medium Risk": {
         "assets": ["SOL-USD", "XRP-USD", "ADA-USD", "MATIC-USD", "LINK-USD"],
         "capital_fraction": 0.30,
         "max_positions": 4,
-        "stop_loss": -0.06,
-        "take_profit": 0.12,
-        "trailing_distance": 0.03,
+        "stop_loss": -0.08,
+        "take_profit": 0.15,
+        "trailing_distance": 0.04,
     },
     "High Risk": {
         "assets": ["AVAX-USD", "DOT-USD", "DOGE-USD", "UNI-USD", "NEAR-USD", "ATOM-USD"],
         "capital_fraction": 0.30,
         "max_positions": 4,
-        "stop_loss": -0.09,
-        "take_profit": 0.18,
-        "trailing_distance": 0.04,
+        "stop_loss": -0.12,
+        "take_profit": 0.25,
+        "trailing_distance": 0.05,
     },
     "Very High Risk": {
         "assets": ["SHIB-USD", "PEPE-USD", "RENDER-USD", "FET-USD", "SUI-USD"],
         "capital_fraction": 0.20,
         "max_positions": 3,
-        "stop_loss": -0.15,
-        "take_profit": 0.30,
-        "trailing_distance": 0.06,
+        "stop_loss": -0.18,
+        "take_profit": 0.40,
+        "trailing_distance": 0.08,
     },
 }
 
@@ -86,11 +85,10 @@ def init_session_state() -> None:
     if "last_cycle" not in st.session_state:
         st.session_state.last_cycle = None
     if "last_cycle_note" not in st.session_state:
-        st.session_state.last_cycle_note = "Self-evolving genetic engine initialized."
+        st.session_state.last_cycle_note = "Anti-churn evolving engine initialized."
     if "total_fees_usd" not in st.session_state:
         st.session_state.total_fees_usd = 0.0
     
-    # Self-Evolving Strategy Pool with tracking metrics
     if "strategies" not in st.session_state:
         st.session_state.strategies = [
             {"name": "Alpha-V1 (Macro Momentum)", "fast": 8, "slow": 21, "vol_mult": 1.5, "pnl": 0.0, "trades_count": 0},
@@ -207,21 +205,17 @@ def adaptive_strategy_signal(df: pd.DataFrame, strategy_config: dict[str, Any]) 
     return "WAIT", "Waiting for volume expansion.", 0.0
 
 def evolve_strategies_genetic() -> str:
-    """Genetic algorithm: evaluates active strategies, eliminates underperformers, and mutates top alpha."""
     pool = st.session_state.strategies
     if len(pool) < 2:
         return "Evolution pending more data."
     
-    # Sort strategies by cumulative performance (PnL)
     pool.sort(key=lambda x: x["pnl"], reverse=True)
     best_strat = pool[0]
-    worst_strat = pool[-1]
     
-    # Mutate parameters from the best performer to create a new evolving variant
     mutation_id = random.randint(100, 999)
     new_fast = max(3, int(best_strat["fast"] + random.choice([-2, -1, 1, 2])))
     new_slow = max(new_fast + 4, int(best_strat["slow"] + random.choice([-3, -1, 2, 4])))
-    new_vol = round(max(1.2, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.15, -0.05, 0.05, 0.15]))), 2)
+    new_vol = round(max(1.4, min(2.5, float(best_strat["vol_mult"]) + random.choice([-0.1, 0.0, 0.1]))), 2)
     
     mutated_strat = {
         "name": f"Mutation-V{mutation_id} (F:{new_fast}/S:{new_slow}/V:{new_vol})",
@@ -232,10 +226,9 @@ def evolve_strategies_genetic() -> str:
         "trades_count": 0
     }
     
-    # Replace the worst strategy with the newly mutated offspring
     pool[-1] = mutated_strat
     add_event(f"🧬 Genetic Evolution: Replaced underperforming strategy with mutated variant {mutated_strat['name']}.", "EVOLVE")
-    return f"Evolved! Spawned {mutated_strat['name']} from elite parent {best_strat['name']}."
+    return f"Evolved! Spawned {mutated_strat['name']}."
 
 def get_total_cost_basis() -> float:
     return sum(float(pos["cost_usd"]) for pos in st.session_state.positions.values())
@@ -332,7 +325,6 @@ def paper_sell(token_id: str, price: float, reason: str) -> bool:
     add_event(f"PAPER SELL [{tier}] {token_id}; P/L {money(pnl)}. {reason}", "SELL")
     del st.session_state.positions[token_id]
     
-    # Trigger genetic evolution check after every closed trade
     if len(st.session_state.trades) % 2 == 0:
         evolve_strategies_genetic()
         
@@ -407,6 +399,8 @@ def auto_paper_cycle() -> dict[str, Any]:
                 (tid, p) for tid, p in st.session_state.positions.items() if p.get("tier") == tier
             ]
             if tier_positions:
+                # ANTI-CHURN RULE: Only rotate if the worst position is actively LOSING money (< -1%).
+                # Never churn winning or breakeven positions to prevent fee bleed.
                 worst_tid, worst_pos = min(
                     tier_positions,
                     key=lambda x: (price_map.get(x[0], x[1]["last_price"]) / x[1]["entry_price"]) - 1
@@ -414,8 +408,8 @@ def auto_paper_cycle() -> dict[str, Any]:
                 worst_curr = price_map.get(worst_tid, worst_pos["last_price"])
                 worst_change = (worst_curr / worst_pos["entry_price"]) - 1
                 
-                if worst_change < 0.02:
-                    if paper_sell(worst_tid, worst_curr, f"Rotating out for evolving alpha ({token_id})."):
+                if worst_change < -0.01:
+                    if paper_sell(worst_tid, worst_curr, f"Rotating out losing position for alpha ({token_id})."):
                         stats["sells"] += 1
                         stats["rotations"] += 1
 
@@ -423,7 +417,7 @@ def auto_paper_cycle() -> dict[str, Any]:
             stats["buys"] += 1
 
     st.session_state.last_cycle = utc_now()
-    st.session_state.last_cycle_note = f"Evolving Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
+    st.session_state.last_cycle_note = f"Anti-Churn Scan: {stats['markets']} markets, {stats['buys']} buys, {stats['sells']} sells ({stats['rotations']} rotations)."
     st.session_state.trades = st.session_state.trades[:500]
     return stats
 
@@ -432,7 +426,7 @@ def render_live_dashboard() -> None:
     init_session_state()
     
     st.title("Coinbase Self-Evolving Paper Trading Agent")
-    st.caption("Autonomous Genetic Strategy Optimization • 4H Timeframe • 1.75x Volume Engine")
+    st.caption("Anti-Churn Fee Protection • Genetic Optimization • 4H Timeframe")
     
     col1, col2 = st.columns([3, 1])
     with col2:
