@@ -91,7 +91,7 @@ def default_state() -> dict[str, Any]:
         "last_cycle": None,
         "last_cycle_note": "Clean state initialized.",
         "total_fees_usd": 0.0,
-        "state_version": 5,
+        "state_version": 6,
     }
 
 def load_json(path: Path, default: Any) -> Any:
@@ -112,7 +112,8 @@ def save_json(path: Path, value: Any) -> None:
 
 def load_state() -> dict[str, Any]:
     state = load_json(STATE_FILE, None)
-    if not isinstance(state, dict) or state.get("state_version", 1) < 5:
+    # Force state reset to version 6 to clear all legacy corrupted positions
+    if not isinstance(state, dict) or state.get("state_version", 1) < 6:
         state = default_state()
         save_json(STATE_FILE, state)
     defaults = default_state()
@@ -260,13 +261,15 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
         return False
     state["cash_usd"] = cash - spend
     state["total_fees_usd"] = float(state.get("total_fees_usd", 0.0)) + fee
+    
+    clean_price = float(price)
     state["positions"][token_id] = {
         "token_id": token_id,
         "strategy": strategy_name,
         "tier": tier,
-        "entry_price": float(price),
-        "last_price": float(price),
-        "peak_price": float(price),
+        "entry_price": clean_price,
+        "last_price": clean_price,
+        "peak_price": clean_price,
         "quantity": float(quantity),
         "cost_usd": float(spend),
         "entry_time": utc_now(),
@@ -274,10 +277,10 @@ def paper_buy(state: dict[str, Any], token_id: str, price: float, strategy_name:
     }
     state["trades"].insert(0, {
         "time": utc_now(), "side": "PAPER BUY", "token": token_id,
-        "price_usd": float(price), "quantity": float(quantity), "value_usd": float(spend),
+        "price_usd": clean_price, "quantity": float(quantity), "value_usd": float(spend),
         "fee_usd": float(fee), "strategy": strategy_name, "tier": tier, "pnl_usd": None,
     })
-    add_event(state, f"PAPER BUY [{tier}] {token_id} at {money(price)}.", "BUY")
+    add_event(state, f"PAPER BUY [{tier}] {token_id} at {money(clean_price)}.", "BUY")
     return True
 
 def paper_sell(state: dict[str, Any], token_id: str, price: float, reason: str) -> bool:
@@ -396,7 +399,7 @@ def render_dashboard() -> None:
     st.subheader("Active Positions (Balanced Risk Tiers)")
     rows = []
     for tid, pos in state["positions"].items():
-        curr_p = prices.get(tid, pos["entry_price"])
+        curr_p = prices.get(tid, pos.get("entry_price", 1.0))
         entry_p = float(pos.get("entry_price", curr_p))
         val = float(pos["quantity"]) * curr_p
         pnl_pos = val - float(pos["cost_usd"])
