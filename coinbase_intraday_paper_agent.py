@@ -1,13 +1,3 @@
-The reason the agent was stuck scanning only "A" and "B" tokens is because **every time the script restarted or you clicked "Reset Account", the scan index reset back to 0**, forcing the agent to start over at the beginning of the alphabetical list every single time.
-
-To make the agent truly **selective** (evaluating the best market opportunities across the entire exchange based on analytical strength rather than alphabetical order or random guessing), we can:
-
-1. **Prioritize High-Liquidity Markets:** Sort and prioritize active, high-volume trading pairs first across the entire market spectrum (BTC, ETH, SOL, SUI, AVAX, etc., regardless of starting letter).
-2. **Rolling Market Sweep:** Implement a persistent rotating pointer that continuously sweeps through the entire 400+ market list cycle-by-cycle without resetting to zero on restarts.
-
-Here is the complete updated script with selective analytical market scanning and persistent rotation:
-
-```python
 """
 Coinbase Paper Trading Agent (Selective Full-Market Sweep & Timed Evolution)
 ---------------------------------------------------------------------------
@@ -143,7 +133,6 @@ def fetch_all_coinbase_pairs() -> list[str]:
                 if p.get("id", "").endswith("-USD") and p.get("status") == "online" and not p.get("trading_disabled", False)
             ]
             if tokens:
-                # Prioritize major high-liquidity tokens first, followed by alphabetical tokens
                 priority_tokens = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "AVAX-USD", "SUI-USD", "ADA-USD", "LINK-USD"]
                 sorted_tokens = sorted(list(set(tokens)))
                 ordered = [t for t in priority_tokens if t in sorted_tokens]
@@ -426,11 +415,9 @@ def auto_paper_cycle() -> dict[str, Any]:
 
     held_tokens = list(st.session_state.positions.keys())
     
-    # Sweep through the market list systematically using a rolling batch window
     if all_tokens:
         idx = st.session_state.scan_index
         batch = all_tokens[idx:idx + CANDLE_BATCH_SIZE]
-        # Advance scan index for the next cycle, wrapping around the entire market list
         st.session_state.scan_index = (idx + CANDLE_BATCH_SIZE) % len(all_tokens)
     else:
         batch = []
@@ -645,5 +632,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-```
